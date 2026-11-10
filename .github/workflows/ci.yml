@@ -92,24 +92,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: pnpm
 
-      # The console has no build step by design: it is a static page that reads
-      # the contract over JSON-RPC. So CI checks that it parses and, more
-      # importantly, that no invented data has crept into it.
-      - name: Parse check
-        run: node --check apps/dashboard/app.js
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and build
+        run: pnpm --filter @keyring/dashboard build
 
       # A console showing plausible-looking fiction is worse than no console,
       # because a reader cannot tell it apart from one that works. These are
-      # the specific inventions from the original design mock-up.
+      # the specific inventions from the original design mock-up, which also
+      # denominated spending in NEAR and described execution as happening on
+      # NEAR rather than on the destination chain.
       - name: Reject fabricated data
         run: |
           set +e
           PATTERN='Treasury-Optimizer|Arb-Executor|Settlement-Bot|Liquidity-Rebalancer|DevOps-Gas-Funder|Legacy-Trader|14,?290|148,?829,?104|billing\.near|yoctoNEAR|Policy Assertions'
-          MATCHES=$(grep -nE "$PATTERN" apps/dashboard/index.html apps/dashboard/app.js apps/dashboard/README.md)
+          MATCHES=$(grep -rnE "$PATTERN" apps/dashboard/src apps/dashboard/index.html apps/dashboard/README.md)
           if [ -n "$MATCHES" ]; then
             echo "Fabricated or placeholder data found in the console:"
             echo "$MATCHES"
@@ -118,6 +124,12 @@ jobs:
             exit 1
           fi
           echo "No fabricated data."
+
+      # The render checks need a live contract, so they are informational here
+      # rather than a gate: a testnet outage must not fail an unrelated PR.
+      - name: Render checks against the reference deployment
+        continue-on-error: true
+        run: pnpm --filter @keyring/dashboard verify
 
   secret-scan:
     name: Secret scan

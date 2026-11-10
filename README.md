@@ -278,22 +278,24 @@ In an MCP client:
 
 ## Owner console
 
-[`apps/dashboard`](apps/dashboard) is a read-only console over a deployed
-Keyring. No build step — it reads live contract state over JSON-RPC.
+[`apps/dashboard`](apps/dashboard) is a Vite app over a deployed Keyring,
+reading live contract state and signing owner actions through your own wallet.
 
 ```bash
-cd apps/dashboard && python3 -m http.server 8787
-# open http://localhost:8787/?account=keyring-gated-1794298589.testnet
+pnpm install
+pnpm --filter @keyring/dashboard dev     # http://localhost:8787
 ```
 
-It shows registered agents, per-asset 24-hour quota against each cap, derived
-addresses for both chains, every recorded request with the rule that refused
-it, and owner-wide budget usage.
+It shows registered agents with per-asset 24-hour quota against each cap,
+derived addresses for both chains, every recorded request with the rule that
+refused it, and owner-wide budget usage. Owner actions — register, disable,
+revoke, set the budget, register the Bitcoin change key — are signed in the
+wallet.
 
-Two deliberate properties. **It holds no key and signs nothing** — owner
-actions are emitted as the exact `near` command to run, so the CLI remains
-sufficient to operate Keyring without it. And **nothing on it is invented**:
-every figure is computed from contract state, with CI rejecting placeholder
+Two deliberate properties. **It holds no key**: writes go to the wallet, and
+since owner authority comes from `predecessor_account_id()`, a call signed by
+anyone else is rejected on chain anyway. And **nothing on it is invented** —
+every figure is computed from contract state, with CI failing on placeholder
 data, because a console showing plausible fiction cannot be told apart from one
 that works.
 

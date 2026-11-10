@@ -5,6 +5,7 @@
 # Node
 node_modules/
 dist/
+dist-verify/
 *.tsbuildinfo
 
 # Secrets — never commit anything but .env.example

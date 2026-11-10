@@ -1,0 +1,30 @@
+{
+  "name": "@keyring/dashboard",
+  "version": "0.1.0",
+  "description": "Owner console for a deployed Keyring contract",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview",
+    "test": "tsc --noEmit",
+    "verify": "vite build --ssr src/verify.ts --outDir dist-verify --logLevel warn && node dist-verify/verify.js"
+  },
+  "dependencies": {
+    "@keyring/sdk": "workspace:*",
+    "@near-wallet-selector/core": "10.1.4",
+    "@near-wallet-selector/modal-ui-js": "10.1.4",
+    "@near-wallet-selector/my-near-wallet": "10.1.4",
+    "@noble/hashes": "1.8.0",
+    "@scure/base": "1.2.6"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.5",
+    "tailwindcss": "4.3.5",
+    "typescript": "5.9.3",
+    "vite": "8.3.7"
+  }
+}
