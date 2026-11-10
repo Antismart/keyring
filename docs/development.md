@@ -80,9 +80,47 @@ credentials and no network.
 
 | Gate | State |
 |---|---|
-| A — foundation | **Met.** Builds, 73 tests pass, lint clean, interfaces documented, mock signer available. |
-| B — policy correctness | Largely covered by the 58 Rust tests. Remaining: MPC success/timeout/failure/partial-signing cases, which need Gate C. |
-| C — real NEAR signing | Not started. |
-| D — Base Sepolia e2e | Not started. |
-| E — Bitcoin e2e | Not started. |
+| A — foundation | **Met.** Builds, lint clean, interfaces documented, mock signer available. |
+| B — policy correctness | **Met.** 72 Rust tests: every rule at both sides of its boundary, access control, aggregate budget, MPC success and failure paths. Partial signing does not apply to the single-payload secp256k1 flow. |
+| C — real NEAR signing | **Met.** Deployed to testnet, real signature from the live signer, callback lifecycle tested, signature independently verified, no direct agent-to-MPC path. |
+| D — Base Sepolia e2e | Not started. Needs EIP-1559 construction in the contract plus a viem cross-check. |
+| E — Bitcoin e2e | Not started. Blocked on the fee-cap/UTXO issue in `security-decisions.md` section 8. |
 | F — agent workflow | Not started. |
+
+## Testnet verification
+
+The Gate C deployment used to verify real signing:
+
+| | |
+|---|---|
+| Keyring contract | `keyring-gatec-1794295861.testnet` |
+| MPC signer | `v1.signer-prod.testnet` (version 3.18.0) |
+| Domain | 0 — CaitSith, purpose Sign, secp256k1 |
+
+Re-verify a signature from chain data alone. The script shares no code with the
+contract: it recomputes the payload, fetches the derived key from the signer,
+verifies the ECDSA signature, and recovers the public key from the signature to
+confirm it is the same key.
+
+```bash
+node scripts/verify-signature.mjs keyring-gatec-1794295861.testnet 1 testnet
+```
+
+To reproduce a deployment from scratch you need a testnet account:
+
+```bash
+near account create-account sponsor-by-faucet-service YOUR.testnet \
+  autogenerate-new-keypair save-to-legacy-keychain network-config testnet create
+
+cd contracts/keyring && cargo near build non-reproducible-wasm && cd -
+
+near contract deploy YOUR.testnet \
+  use-file target/near/keyring_contract/keyring_contract.wasm \
+  with-init-call new json-args \
+  '{"signer":{"mpc":{"contract_id":"v1.signer-prod.testnet"}}}' \
+  prepaid-gas '100 TGas' attached-deposit '0 NEAR' \
+  network-config testnet sign-with-legacy-keychain send
+```
+
+A `request_transfer` call must attach about 300 TGas: the contract forwards
+100 TGas to the signer and reserves 20 TGas for its own callback.

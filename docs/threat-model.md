@@ -1,9 +1,10 @@
 # Threat model
 
 Scope: the Keyring contract, the SDK, the MCP server and the relayer path, as
-implemented at **Gate A**. Signing and foreign-chain transaction construction
-are not implemented yet, so threats against them are listed as *deferred* with
-the gate that will address them, rather than claimed as mitigated.
+implemented at **Gate C**. MPC signing is implemented and verified on testnet.
+Foreign-chain transaction construction is not written yet, so threats against it
+are listed as *deferred* with the gate that will address them, rather than
+claimed as mitigated.
 
 ## Assets
 
@@ -134,13 +135,19 @@ enforced by the absence of a dangerous parameter, not by a construction test.**
 
 ### T8 — An agent asks the MPC signer directly
 
-**Mitigated by deployment, to be verified at Gate C.** The contract is intended
-to be the only authorised predecessor for its derived keys, and the agent
-credential is a function-call key scoped to the Keyring contract. The derivation
-path is computed by the contract from its own state and is never a caller
-parameter, so an agent cannot select another agent's key.
+**Mitigated, and verified on testnet.** The signer derives every key from its
+own caller: it binds the key to `predecessor` plus `path`. Since only the
+Keyring contract ever calls `sign`, only the Keyring contract can obtain
+signatures for Keyring keys.
 
-Gate C must verify on testnet that no direct agent-to-MPC path exists.
+This was checked empirically, not assumed. Querying `derived_public_key` for the
+same path with `predecessor` set to the agent account returns a **different**
+key from the one bound to the contract. An agent that calls the signer directly
+gets keys for its own account, which control nothing in Keyring.
+
+The derivation path is computed by the contract from the owner, agent label and
+chain, and is never a caller parameter, so an agent also cannot select another
+agent's key.
 
 ### T9 — A non-owner changes policy or re-enables an agent
 
@@ -178,14 +185,21 @@ prominently documented before any Bitcoin claim is made.
 
 ### T13 — The MPC signer is unavailable, slow, or returns a signature nobody sees
 
-**Deferred to Gate C.** Requires the lifecycle state machine
-(`Signing -> Signed | Failed`), callback predecessor checks, and an explicit
-rule for when a reservation may be released. The default is conservative: if the
-contract cannot establish that no usable signature was produced, the reservation
-stands.
+**Mitigated.** The lifecycle `Created -> Signing -> Signed | Failed` is
+implemented. `on_signed` is private and additionally enforces
+`predecessor == current_account` explicitly, so the check is testable rather
+than only present in the compiled wasm wrapper.
 
-Invariants 12 and 14 are **not yet proven**; `Signing`, `Signed` and `Failed`
-are declared but unreachable at Gate A.
+A failed or timed-out signing **retains** the budget reservation. The contract
+cannot prove the MPC network never assembled a signature, so releasing budget
+could authorise the same spend twice (security decision 16).
+
+An unexpected Ed25519 response to a secp256k1 request is rejected and the
+request marked `Failed`, rather than stored as though valid.
+
+**Residual risk:** a genuinely failed signing consumes budget until the window
+rolls. Invariant 12 is covered; invariant 14's duplicate-request case remains
+bounded at 32 keys per agent (decision 6).
 
 ### T14 — Owner account compromise
 
@@ -203,8 +217,10 @@ compromised *owner*.
 4. A failed broadcast still consumes budget until the window rolls (decision 4).
 5. Transaction-construction invariants (5–8) are not yet proven by construction
    tests — only by the absence of dangerous parameters. Gate D/E must close this.
-6. MPC failure handling is unimplemented (T13).
-7. No audit, no formal verification, no mainnet use.
+6. A failed signing consumes budget until the window rolls (decision 16).
+7. The mirrored MPC wire types must be re-checked whenever the signer contract
+   is upgraded (decision 14).
+8. No audit, no formal verification, no mainnet use.
 
 ## What has been verified, and how
 
@@ -214,6 +230,9 @@ compromised *owner*.
 | Owner-only mutation, agent identity, aggregate budget | 28 tests in the near-sdk mock VM |
 | MCP input validation | 12 Node tests |
 | Contract compiles to wasm with ABI | `cargo near build`, 251.7 KB artifact |
-| Real MPC signing | **Not verified.** Mock signer only. |
-| Any foreign-chain transaction | **Not verified.** Not implemented. |
-| Testnet deployment | **Not verified.** Not attempted. |
+| MPC lifecycle and callback access control | 14 tests, including wire-format pinning |
+| Real MPC signing | **Verified on testnet.** `keyring-gatec-1794295861.testnet`, request 1, `mock: false` |
+| Signature correctness | **Independently verified.** `scripts/verify-signature.mjs`, 8/8 checks |
+| No direct agent-to-MPC path | **Verified.** The agent-derived key differs from the contract-derived key |
+| Any foreign-chain transaction | **Not verified.** Not implemented; Gate C signs a domain-separated commitment, not a transaction |
+| Broadcast to any chain | **Not verified.** Not implemented. |

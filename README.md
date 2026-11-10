@@ -12,26 +12,41 @@ via NEAR Chain Signatures (MPC).
 
 ---
 
-## Status: Gate A of F
+## Status: Gate C of F
 
 This is early, honest-about-itself infrastructure. What exists today:
 
 | | |
 |---|---|
-| ✅ **Policy engine** | All seven MVP rules implemented, 30 boundary tests |
+| ✅ **Policy engine** | All seven MVP rules, 30 boundary tests |
 | ✅ **Access control** | Owner-only mutation, key-based agent identity, 28 tests |
-| ✅ **Contract builds** | 251.7 KB wasm + ABI via `cargo near build` |
+| ✅ **Real MPC signing** | Deployed to NEAR testnet; a real signature from `v1.signer-prod.testnet`, independently verified |
+| ✅ **Signing lifecycle** | `Created → Signing → Signed \| Failed`, private callback, 14 tests |
 | ✅ **Typed SDK + MCP surface** | 15 TypeScript tests |
-| ⬜ **Real MPC signing** | **Not implemented.** Mock signer only. |
-| ⬜ **Any chain transaction** | **Not implemented.** No EVM or Bitcoin transaction is built or signed. |
-| ⬜ **Testnet deployment** | Not attempted. |
+| ⬜ **EVM / Bitcoin transactions** | **Not implemented.** Gate C signs a domain-separated commitment to the approved fields, *not* a broadcastable transaction. |
+| ⬜ **Broadcast to any chain** | Not implemented. |
 
-**Nothing here has been audited, deployed, or used to move value of any kind.**
-73 tests pass locally against a mock signer. A mock signature is not evidence of
-MPC integration, and the contract exposes `is_mock_signer()` so that no demo can
-quietly imply otherwise.
+**Nothing here has been audited or used to move value of any kind.** 87 tests
+pass, and real signing is verified on testnet — but no Ethereum or Bitcoin
+transaction has yet been constructed, so Keyring cannot currently make a
+payment on any chain. That is Gate D.
+
+A mock signature is never presented as a real one: `StoredSignature.mock` is
+persisted on every request, so the distinction survives into any dashboard,
+indexer or transcript that reads it.
 
 See `docs/development.md` for the full gate table.
+
+### Verify it yourself
+
+```bash
+node scripts/verify-signature.mjs keyring-gatec-1794295861.testnet 1 testnet
+```
+
+This shares no code with the contract. It recomputes the signed payload from the
+policy-approved fields, fetches the derived key from the MPC signer, verifies
+the ECDSA signature, and recovers the public key from the signature to confirm
+it is the same key — 8 checks, all independent of the contract's own claims.
 
 ## How it works
 
@@ -45,7 +60,7 @@ MCP server / TypeScript SDK (semi-trusted — no authority)
 NEAR Keyring contract  ◄── the policy enforcement boundary
         │
         ▼
-NEAR Chain Signatures MPC      [Gate C]
+NEAR Chain Signatures MPC      ✅ verified on testnet
         │
         ▼
 Relayer → Base Sepolia / Bitcoin testnet4   [Gate D / E]
@@ -127,7 +142,13 @@ parameter:
 
 | Method | |
 |---|---|
-| `request_transfer(chain, destination, amount, fee, idempotency_key)` | Returns `Created`, `Refused` or `Duplicate` |
+| `request_transfer(chain, destination, amount, fee, idempotency_key)` | Returns `Signed`, `Refused`, `Duplicate` or `SigningFailed` |
+| `on_signed(...)` | Private callback. Rejects any predecessor but the contract itself. |
+
+Attach about 300 TGas to `request_transfer`: the contract forwards 100 TGas to
+the signer and reserves 20 TGas for its callback. The 1 yoctoNEAR signer deposit
+is attached by the contract from its own balance, so `request_transfer` is not
+payable and an agent cannot influence it.
 
 **Views** — no mutation, no budget consumed:
 
@@ -158,8 +179,14 @@ Read `docs/threat-model.md` for the full list. The ones that matter most:
    refunding on a relayer's report would let a hostile relayer mint spend capacity.
 5. **Transaction-construction invariants are not yet proven by tests** — only by
    the absence of dangerous parameters. Gate D/E must close this.
-6. **MPC failure handling is unimplemented.** `Signing`/`Signed`/`Failed` are
-   declared but unreachable.
+6. **A failed signing keeps its budget reservation.** The contract cannot prove
+   the MPC network never assembled a signature, so releasing budget could
+   authorise the same spend twice. A failed signing therefore consumes budget
+   until the window rolls.
+7. **The MPC wire types are mirrored, not imported.** The official
+   `near-mpc-sdk` 0.0.1 does not compile against near-sdk 5.30.1. The schemas
+   were read from the deployed signer's own ABI and are pinned by tests, but
+   must be re-checked when the signer is upgraded.
 
 ## Documentation
 

@@ -174,3 +174,97 @@ Exposing it means no dashboard, demo or report can present mock output as a real
 MPC signature without the deployment contradicting it. The real signer interface
 is written at Gate C against the deployed testnet signer contract, not from
 memory.
+
+## 14. MPC wire types are mirrored, not imported
+
+**Settled.** `contracts/keyring/src/mpc.rs` defines the signer's request and
+response types locally instead of depending on `near-mpc-sdk`.
+
+The official crates exist only at version 0.0.1, and their transitive dependency
+`near-mpc-crypto-types` 0.0.1 does not compile against near-sdk 5.30.1:
+near-sdk added `CurveType::MLDSA65` and the crate has a non-exhaustive match
+over it. No newer release exists.
+
+Because the boundary is JSON, mirroring the verified schema is sufficient, and
+for a security-sensitive contract a smaller dependency surface is preferable.
+The schemas were not written from memory or from documentation — they were read
+from the deployed signer's own embedded ABI, obtained by calling its
+`__contract_abi` export over RPC and zstd-decompressing the result:
+
+- account `v1.signer-prod.testnet`, contract version `3.18.0`
+- source `github.com/near/mpc` @ `e691bdb98d68dcf74653da58d043453a6318765f`
+
+One detail that a from-memory implementation would have got wrong: the payload
+field serialises as **`payload_v2`**, not `payload`. The signer still accepts
+`payload`, but interprets it as a deprecated raw `[u8; 32]` array rather than
+a hex string, so sending the old name would have failed confusingly.
+
+**The trade-off:** these definitions must be re-checked against the signer's ABI
+whenever it is upgraded. `contracts/keyring/tests/mpc_lifecycle.rs` pins the
+exact request and response JSON, so a schema change fails a test rather than
+silently producing a request the signer misreads.
+
+## 15. Gate C signs a contract-derived commitment, not a transaction
+
+**Open — replaced at Gate D.** `signer::gate_c_commitment` hashes the
+policy-approved fields into the 32 bytes sent to the MPC signer. It is not an
+Ethereum or Bitcoin transaction.
+
+This exists so the MPC round trip, callback lifecycle and signature
+verification could be proven before transaction construction was written. Two
+properties keep it safe:
+
+1. **Contract-derived.** Every input comes from validated contract state. No
+   caller supplies or influences the bytes, so this is not a method that signs
+   an arbitrary caller-supplied hash.
+2. **Not replayable.** The `keyring-v1:gate-c-commitment:` domain separator
+   means the preimage cannot coincide with an Ethereum RLP transaction hash or a
+   Bitcoin sighash, so the signature is worthless as a payment anywhere.
+
+Gate D replaces the function body with the real EIP-1559 transaction hash, built
+from the same validated fields.
+
+## 16. A failed signing retains its budget reservation
+
+**Settled.** `on_signed` moves the request to `Failed` and leaves the
+reservation in place.
+
+A locally observed promise failure or yield timeout does not prove the MPC
+network never assembled a signature; `respond` may have succeeded on the node
+side. Releasing the budget on that evidence could authorise the same spend
+twice. CLAUDE.md §6 requires the conservative reservation when the contract
+cannot establish that no usable signature exists, which is exactly this case.
+
+**The consequence,** stated plainly: a genuinely failed signing consumes budget
+until the 24-hour window rolls. That is an availability cost accepted to protect
+spending integrity.
+
+## 17. Mock signatures are flagged in stored data, not just by deployment
+
+**Settled.** `StoredSignature.mock` is persisted on the request alongside the
+signature itself, in addition to the `is_mock_signer()` view.
+
+A deployment-level flag can be read separately from the data and lost in
+transit to a dashboard, an indexer or a demo transcript. Storing the flag on the
+record makes a mock signature and a real one distinguishable at the data level,
+permanently, wherever the record is read.
+
+## 18. Gate C was verified on testnet, and the record is reproducible
+
+**Settled.** The contract was deployed and exercised against the live signer:
+
+- Keyring contract: `keyring-gatec-1794295861.testnet`
+- Signer: `v1.signer-prod.testnet`, domain 0 (CaitSith, purpose Sign, secp256k1)
+- Request 1: allowed, real signature, `mock: false`
+- Request 2: refused with `destination_not_allowed`, no MPC call made
+
+`scripts/verify-signature.mjs` re-verifies any request from chain data alone,
+sharing no code with the contract. It recomputes the payload, fetches the
+derived key from the signer, verifies the ECDSA signature and recovers the
+public key from the signature to confirm it is the same key.
+
+The agent-to-MPC boundary was checked empirically rather than assumed. Asking
+the signer for the same path with `predecessor` set to the agent account
+returns a **different** key from the one bound to the Keyring contract, because
+the signer derives every key from its own caller. An agent calling the signer
+directly therefore cannot reach a Keyring key.
