@@ -7,6 +7,7 @@
 | `contracts/keyring` | NEAR contract: state, policy engine, events, signer seam | Trusted — the enforcement boundary |
 | `packages/sdk` | Typed TypeScript client | Semi-trusted — no authority |
 | `packages/mcp-server` | Narrow MCP tool surface for agents | Semi-trusted — no authority |
+| `apps/dashboard` | Owner console, read-only | Convenience layer — no authority |
 | `evals/` | Reproducible agent demo transcripts | Documentation |
 
 ## Contract modules

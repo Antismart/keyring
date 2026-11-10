@@ -276,6 +276,27 @@ In an MCP client:
 }
 ```
 
+## Owner console
+
+[`apps/dashboard`](apps/dashboard) is a read-only console over a deployed
+Keyring. No build step — it reads live contract state over JSON-RPC.
+
+```bash
+cd apps/dashboard && python3 -m http.server 8787
+# open http://localhost:8787/?account=keyring-gated-1794298589.testnet
+```
+
+It shows registered agents, per-asset 24-hour quota against each cap, derived
+addresses for both chains, every recorded request with the rule that refused
+it, and owner-wide budget usage.
+
+Two deliberate properties. **It holds no key and signs nothing** — owner
+actions are emitted as the exact `near` command to run, so the CLI remains
+sufficient to operate Keyring without it. And **nothing on it is invented**:
+every figure is computed from contract state, with CI rejecting placeholder
+data, because a console showing plausible fiction cannot be told apart from one
+that works.
+
 ## The demo
 
 [`evals/transcript.md`](evals/transcript.md) is a real recorded run against the
@@ -349,6 +370,7 @@ The ones that matter most:
 | [`docs/threat-model.md`](docs/threat-model.md) | Assets, trust boundaries, 14 threats, residual risks |
 | [`docs/security-decisions.md`](docs/security-decisions.md) | 33 decisions with reasoning, including superseded ones |
 | [`docs/development.md`](docs/development.md) | Setup, verified commands, gate status |
+| [`apps/dashboard`](apps/dashboard) | Owner console, and what it deliberately does not do |
 | [`evals/`](evals/) | Recorded agent demo |
 | [`CLAUDE.md`](CLAUDE.md) | The engineering contract governing this repository |
 
