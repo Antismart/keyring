@@ -18,11 +18,20 @@ import {
   validateSimulateTransfer,
 } from "../dist/tools.js";
 
+const VALID_PARAMS = {
+  evm: {
+    nonce: "0",
+    gas_limit: "21000",
+    max_fee_per_gas: "1000000000",
+    max_priority_fee_per_gas: "1000000",
+  },
+};
+
 const VALID_TRANSFER = {
   chain: "base_sepolia",
   destination: "0x1111111111111111111111111111111111111111",
   amount: "1000000000000000000",
-  fee: "21000000000000",
+  params: VALID_PARAMS,
   idempotency_key: "invoice-42",
 };
 
@@ -105,7 +114,7 @@ test("simulate_transfer requires owner and agent key", () => {
     chain: "base_sepolia",
     destination: VALID_TRANSFER.destination,
     amount: "1",
-    fee: "1",
+    params: VALID_PARAMS,
   });
   assert.equal(ok.owner, "owner.testnet");
 });
@@ -132,4 +141,45 @@ test("the exposed tool surface is exactly the five read/spend tools", () => {
     "get_history",
   ]);
   assert.deepEqual(Object.keys(TOOL_SCHEMAS).sort(), [...TOOL_NAMES].sort());
+});
+
+test("there is no fee field to declare: the contract derives it", () => {
+  // The caller supplies gas numbers; fee = gas_limit * max_fee_per_gas is
+  // computed on chain. A caller cannot declare a small fee and have a
+  // transaction signed that authorises a large one.
+  const out = validateRequestTransfer(VALID_TRANSFER);
+  assert.ok(!("fee" in out));
+  assert.equal(out.params.evm.gas_limit, "21000");
+  assert.equal(out.params.evm.max_fee_per_gas, "1000000000");
+});
+
+test("a tip above the fee cap is rejected, matching the contract and viem", () => {
+  assert.throws(
+    () =>
+      validateRequestTransfer({
+        ...VALID_TRANSFER,
+        params: {
+          evm: { ...VALID_PARAMS.evm, max_priority_fee_per_gas: "2000000000" },
+        },
+      }),
+    (err: unknown) => err instanceof ToolInputError,
+  );
+});
+
+test("gas parameters must be decimal strings, not numbers", () => {
+  assert.throws(
+    () =>
+      validateRequestTransfer({
+        ...VALID_TRANSFER,
+        params: { evm: { ...VALID_PARAMS.evm, gas_limit: 21000 } },
+      }),
+    (err: unknown) => err instanceof ToolInputError,
+  );
+});
+
+test("missing EVM params are rejected", () => {
+  assert.throws(
+    () => validateRequestTransfer({ ...VALID_TRANSFER, params: {} }),
+    (err: unknown) => err instanceof ToolInputError && err.field === "params",
+  );
 });

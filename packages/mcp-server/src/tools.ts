@@ -17,7 +17,7 @@
  * than a failed transaction would.
  */
 
-import type { Chain } from "@keyring/sdk";
+import type { Chain, EvmParams } from "@keyring/sdk";
 
 /** Names of the tools this server exposes. */
 export const TOOL_NAMES = [
@@ -106,6 +106,44 @@ function requireBaseUnits(input: Record<string, unknown>, field: string): string
   return value;
 }
 
+/**
+ * Validates the nested EVM transaction parameters.
+ *
+ * There is deliberately no `fee` field. The contract derives the fee as
+ * `gas_limit * max_fee_per_gas`, so a caller cannot declare one fee and have a
+ * transaction signed that authorises another.
+ */
+function requireEvmParams(input: Record<string, unknown>, field: string): { evm: EvmParams } {
+  const raw = input[field];
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ToolInputError(field, "expected an object");
+  }
+  const outer = raw as Record<string, unknown>;
+  if (!("evm" in outer)) {
+    throw new ToolInputError(field, "expected an 'evm' key for an EVM chain");
+  }
+  const evm = outer.evm;
+  if (typeof evm !== "object" || evm === null || Array.isArray(evm)) {
+    throw new ToolInputError(`${field}.evm`, "expected an object");
+  }
+  const e = evm as Record<string, unknown>;
+  const params: EvmParams = {
+    nonce: requireBaseUnits(e, "nonce"),
+    gas_limit: requireBaseUnits(e, "gas_limit"),
+    max_fee_per_gas: requireBaseUnits(e, "max_fee_per_gas"),
+    max_priority_fee_per_gas: requireBaseUnits(e, "max_priority_fee_per_gas"),
+  };
+  // Mirrors the contract's own check so the agent gets a clear error here
+  // rather than a failed transaction. The contract re-checks regardless.
+  if (BigInt(params.max_priority_fee_per_gas) > BigInt(params.max_fee_per_gas)) {
+    throw new ToolInputError(
+      `${field}.evm.max_priority_fee_per_gas`,
+      "must not exceed max_fee_per_gas",
+    );
+  }
+  return { evm: params };
+}
+
 export interface GetAddressesInput {
   owner: string;
   agent_public_key: string;
@@ -122,14 +160,14 @@ export interface SimulateTransferInput {
   chain: Chain;
   destination: string;
   amount: string;
-  fee: string;
+  params: { evm: EvmParams };
 }
 
 export interface RequestTransferInput {
   chain: Chain;
   destination: string;
   amount: string;
-  fee: string;
+  params: { evm: EvmParams };
   idempotency_key: string;
 }
 
@@ -163,7 +201,7 @@ export function validateSimulateTransfer(raw: unknown): SimulateTransferInput {
     chain: requireChain(input, "chain"),
     destination: requireString(input, "destination", 128),
     amount: requireBaseUnits(input, "amount"),
-    fee: requireBaseUnits(input, "fee"),
+    params: requireEvmParams(input, "params"),
   };
 }
 
@@ -173,7 +211,7 @@ export function validateRequestTransfer(raw: unknown): RequestTransferInput {
     chain: requireChain(input, "chain"),
     destination: requireString(input, "destination", 128),
     amount: requireBaseUnits(input, "amount"),
-    fee: requireBaseUnits(input, "fee"),
+    params: requireEvmParams(input, "params"),
     idempotency_key: requireString(input, "idempotency_key", 64),
   };
 }
@@ -233,7 +271,7 @@ export const TOOL_SCHEMAS: Record<ToolName, { description: string; inputSchema: 
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["owner", "agent_public_key", "chain", "destination", "amount", "fee"],
+      required: ["owner", "agent_public_key", "chain", "destination", "amount", "params"],
       properties: {
         owner: { type: "string" },
         agent_public_key: { type: "string" },
@@ -244,7 +282,26 @@ export const TOOL_SCHEMAS: Record<ToolName, { description: string; inputSchema: 
           pattern: "^[0-9]+$",
           description: "Amount in base units (wei or satoshi) as a decimal string",
         },
-        fee: { type: "string", pattern: "^[0-9]+$", description: "Fee in base units" },
+        params: {
+          type: "object",
+          additionalProperties: false,
+          required: ["evm"],
+          description:
+            "Chain-specific transaction inputs. No fee field: the contract derives the fee from gas_limit and max_fee_per_gas.",
+          properties: {
+            evm: {
+              type: "object",
+              additionalProperties: false,
+              required: ["nonce", "gas_limit", "max_fee_per_gas", "max_priority_fee_per_gas"],
+              properties: {
+                nonce: { type: "string", pattern: "^[0-9]+$" },
+                gas_limit: { type: "string", pattern: "^[0-9]+$" },
+                max_fee_per_gas: { type: "string", pattern: "^[0-9]+$" },
+                max_priority_fee_per_gas: { type: "string", pattern: "^[0-9]+$" },
+              },
+            },
+          },
+        },
       },
     },
   },
@@ -254,12 +311,31 @@ export const TOOL_SCHEMAS: Record<ToolName, { description: string; inputSchema: 
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["chain", "destination", "amount", "fee", "idempotency_key"],
+      required: ["chain", "destination", "amount", "params", "idempotency_key"],
       properties: {
         chain: { type: "string", enum: [...CHAINS] },
         destination: { type: "string" },
         amount: { type: "string", pattern: "^[0-9]+$" },
-        fee: { type: "string", pattern: "^[0-9]+$" },
+        params: {
+          type: "object",
+          additionalProperties: false,
+          required: ["evm"],
+          description:
+            "Chain-specific transaction inputs. No fee field: the contract derives the fee from gas_limit and max_fee_per_gas.",
+          properties: {
+            evm: {
+              type: "object",
+              additionalProperties: false,
+              required: ["nonce", "gas_limit", "max_fee_per_gas", "max_priority_fee_per_gas"],
+              properties: {
+                nonce: { type: "string", pattern: "^[0-9]+$" },
+                gas_limit: { type: "string", pattern: "^[0-9]+$" },
+                max_fee_per_gas: { type: "string", pattern: "^[0-9]+$" },
+                max_priority_fee_per_gas: { type: "string", pattern: "^[0-9]+$" },
+              },
+            },
+          },
+        },
         idempotency_key: {
           type: "string",
           maxLength: 64,

@@ -21,7 +21,10 @@
     "test": "tsc -b && node --test --experimental-strip-types test/*.test.ts"
   },
   "devDependencies": {
-    "typescript": "5.9.3",
-    "@types/node": "22.18.8"
+    "@types/node": "22.18.8",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "viem": "2.37.6"
   }
 }

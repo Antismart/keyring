@@ -22,6 +22,7 @@ import type {
   Agent,
   BaseUnits,
   Chain,
+  ChainParams,
   Keyring,
   Policy,
   PublicKeyString,
@@ -65,8 +66,13 @@ export interface TransferArgs {
   destination: string;
   /** Amount in base units (wei / satoshi) as a decimal string. */
   amount: BaseUnits;
-  /** The fee the broadcast transaction will pay, in base units. */
-  fee: BaseUnits;
+  /**
+   * Chain-specific transaction inputs (nonce, gas prices).
+   *
+   * There is no fee field: the contract derives the fee from these, so a
+   * caller cannot declare one fee and sign a transaction authorising another.
+   */
+  params: ChainParams;
   /**
    * A caller-chosen key that makes the request idempotent. Re-sending the same
    * key returns the original request instead of creating a second one.
@@ -145,7 +151,7 @@ export class KeyringClient {
       chain: args.chain,
       destination: args.destination,
       amount: args.amount,
-      fee: args.fee,
+      params: args.params,
     });
   }
 
@@ -248,7 +254,7 @@ export class KeyringClient {
       chain: args.chain,
       destination: args.destination,
       amount: args.amount,
-      fee: args.fee,
+      params: args.params,
       idempotency_key: args.idempotencyKey,
     });
   }

@@ -20,6 +20,31 @@ export type BaseUnits = string;
 /** Chains Keyring can sign for. Mirrors the Rust `Chain` enum. */
 export type Chain = "base_sepolia" | "bitcoin_testnet4";
 
+/**
+ * Gas parameters for an EVM transfer.
+ *
+ * Supplied by the caller from an RPC. Note what is absent: no recipient, no
+ * amount, no calldata. Wrong values here cause a transaction that fails or
+ * overpays within the fee cap; none of them can redirect a payment.
+ *
+ * The fee is **not** a parameter. The contract derives it as
+ * `gas_limit * max_fee_per_gas`, so the value policy checks is the same number
+ * the transaction can actually spend.
+ */
+export interface EvmParams {
+  /** Sender nonce, as a decimal string. */
+  nonce: string;
+  /** Gas limit. Must be between 21000 and 200000 for a plain transfer. */
+  gas_limit: string;
+  /** Fee ceiling per gas, in wei. */
+  max_fee_per_gas: string;
+  /** Tip per gas, in wei. Must not exceed `max_fee_per_gas`. */
+  max_priority_fee_per_gas: string;
+}
+
+/** Chain-specific transaction parameters. */
+export type ChainParams = { evm: EvmParams };
+
 /** A NEAR public key in `ed25519:<base58>` or `secp256k1:<base58>` form. */
 export type PublicKeyString = string;
 
@@ -154,7 +179,15 @@ export interface TransferRequest {
   chain: Chain;
   destination: string;
   amount: BaseUnits;
+  /**
+   * The maximum fee the signed transaction can pay.
+   *
+   * Derived by the contract from {@link TransferRequest.params}, never
+   * supplied by the caller.
+   */
   fee: BaseUnits;
+  /** The chain-specific inputs used to build the signed transaction. */
+  params: ChainParams;
   status: RequestStatus;
   reserved: BaseUnits;
   idempotency_key: string;
