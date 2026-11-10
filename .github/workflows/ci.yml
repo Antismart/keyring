@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep this in step with rust-toolchain.toml.
+  RUST_TOOLCHAIN: "1.99"
+  CARGO_NEAR_VERSION: "0.23.0"
+
+jobs:
+  contract:
+    name: Contract (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \
+            --component rustfmt,clippy --target wasm32-unknown-unknown
+          rustup default "$RUST_TOOLCHAIN"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      # The contract lib must be linted for its real target. near-sdk emits a
+      # compile_error for a plain host-target `cargo build`, so the wasm target
+      # is not optional here.
+      - name: Clippy (contract, wasm target)
+        run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+
+      # Tests run on the host target, where the `unit-testing` feature and the
+      # near-sdk mock VM are available.
+      - name: Clippy (tests, host target)
+        run: cargo clippy --tests -- -D warnings
+
+      - name: Unit and boundary tests
+        run: cargo test --workspace
+
+      - name: Install cargo-near
+        run: cargo install --locked cargo-near --version "$CARGO_NEAR_VERSION"
+
+      # cargo-near must run from the contract crate, not the virtual
+      # workspace root, or metadata resolution fails.
+      - name: Build contract wasm
+        working-directory: contracts/keyring
+        run: cargo near build non-reproducible-wasm
+
+      - name: Upload contract artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyring-contract-wasm
+          path: target/near/**/*.wasm
+          if-no-files-found: error
+
+  typescript:
+    name: SDK and MCP server (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm -r typecheck
+
+      - name: Build
+        run: pnpm -r build
+
+      - name: Test
+        run: pnpm -r test
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Invariant 17: no secret, key, seed phrase or funded credential may be
+      # committed. A grep is a backstop, not a guarantee.
+      - name: Grep for committed key material
+        run: |
+          set +e
+          PATTERN='(BEGIN [A-Z ]*PRIVATE KEY|ed25519:[1-9A-HJ-NP-Za-km-z]{80,}|"private_key"[[:space:]]*:|secp256k1:[1-9A-HJ-NP-Za-km-z]{80,})'
+          MATCHES=$(grep -rInE "$PATTERN" . \
+            --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=target \
+            --exclude=ci.yml)
+          if [ -n "$MATCHES" ]; then
+            echo "Possible committed key material:"
+            echo "$MATCHES"
+            exit 1
+          fi
+          echo "No key material found."
+
+      - name: Ensure no .env file is tracked
+        run: |
+          if git ls-files --error-unmatch .env 2>/dev/null; then
+            echo ".env must never be committed"; exit 1
+          fi
+          echo "No tracked .env."
