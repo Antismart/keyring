@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta content="width=device-width, initial-scale=1.0" name="viewport" />
+<title>Keyring Console</title>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: { extend: {
+    colors: {
+      "on-primary-container": "#00422b", "surface-variant": "#d3e4fe", "outline": "#6c7a71",
+      "secondary": "#565e74", "surface-container-high": "#dce9ff", "tertiary": "#005ac2",
+      "surface-container-low": "#eff4ff", "surface-container-lowest": "#ffffff",
+      "surface-container": "#e5eeff", "on-surface": "#0b1c30", "error": "#ba1a1a",
+      "on-error-container": "#93000a", "primary": "#006c49", "on-surface-variant": "#3c4a42",
+      "outline-variant": "#bbcabf", "surface": "#f8f9ff", "primary-container": "#10b981",
+      "error-container": "#ffdad6", "inverse-surface": "#213145", "surface-dim": "#cbdbf5",
+    },
+    borderRadius: { DEFAULT: "0.125rem", lg: "0.25rem", xl: "0.5rem", full: "0.75rem" },
+    fontFamily: { sans: ["Inter", "system-ui", "sans-serif"], mono: ["ui-monospace", "SFMono-Regular", "monospace"] },
+  }},
+};
+</script>
+<style>
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #bbcabf; border-radius: 4px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body class="bg-surface text-on-surface antialiased text-sm">
+
+<!-- ───────────────────────────── sidebar ───────────────────────────── -->
+<aside class="fixed left-0 top-0 h-screen w-[248px] bg-[#0c111d] text-slate-300 z-50 flex flex-col border-r border-slate-800">
+  <div class="h-16 px-3 flex items-center justify-between border-b border-slate-800">
+    <div class="flex items-center gap-2">
+      <span class="material-symbols-outlined text-[22px] text-emerald-400">key</span>
+      <span class="text-slate-100 tracking-wider font-semibold text-base">KEYRING</span>
+    </div>
+    <span class="px-1.5 py-0.5 text-[10px] font-medium tracking-wide uppercase text-amber-400 bg-amber-400/10 border border-amber-400/30 rounded-lg">TESTNET</span>
+  </div>
+
+  <nav class="flex-1 overflow-y-auto px-2 py-3 space-y-3">
+    <div class="space-y-1">
+      <div class="px-2 py-1 text-[11px] uppercase tracking-wider text-slate-500 font-semibold">Workspace</div>
+      <a data-tab="overview" class="tab flex items-center gap-2 px-2 py-1.5 rounded-lg text-slate-400 hover:bg-slate-800/60 hover:text-slate-200 transition-colors" href="#">
+        <span class="material-symbols-outlined text-[18px]">grid_view</span><span>Overview</span></a>
+      <a data-tab="agents" class="tab flex items-center gap-2 px-2 py-1.5 rounded-lg text-slate-400 hover:bg-slate-800/60 hover:text-slate-200 transition-colors" href="#">
+        <span class="material-symbols-outlined text-[18px]">memory</span><span>Agents</span></a>
+      <a data-tab="activity" class="tab flex items-center gap-2 px-2 py-1.5 rounded-lg text-slate-400 hover:bg-slate-800/60 hover:text-slate-200 transition-colors" href="#">
+        <span class="material-symbols-outlined text-[18px]">receipt_long</span><span>Activity</span></a>
+    </div>
+    <div class="space-y-1">
+      <div class="px-2 py-1 text-[11px] uppercase tracking-wider text-slate-500 font-semibold">Owner</div>
+      <a data-tab="actions" class="tab flex items-center gap-2 px-2 py-1.5 rounded-lg text-slate-400 hover:bg-slate-800/60 hover:text-slate-200 transition-colors" href="#">
+        <span class="material-symbols-outlined text-[18px]">terminal</span><span>Owner Actions</span></a>
+    </div>
+  </nav>
+
+  <div class="p-2 border-t border-slate-800 bg-[#090d16]">
+    <div class="p-2 rounded-lg bg-slate-900/60 border border-slate-800">
+      <p class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1">Keyring contract</p>
+      <p id="side-contract" class="mono text-[11px] text-slate-200 break-all">—</p>
+      <p id="side-signer" class="mono text-[10px] text-slate-500 break-all mt-1">—</p>
+    </div>
+  </div>
+</aside>
+
+<div class="pl-[248px] min-h-screen flex flex-col">
+<!-- ───────────────────────────── header ───────────────────────────── -->
+<header class="sticky top-0 h-16 bg-surface/90 backdrop-blur-xl border-b border-outline-variant/40 z-40 px-6 flex items-center justify-between gap-4">
+  <div class="flex items-center gap-2 text-on-surface-variant min-w-0">
+    <span class="material-symbols-outlined text-[18px] text-secondary">shield</span>
+    <span class="hidden sm:inline">Control plane</span>
+    <span class="material-symbols-outlined text-[14px] text-outline-variant">chevron_right</span>
+    <span id="crumb" class="font-semibold text-on-surface capitalize">Overview</span>
+  </div>
+  <div class="flex items-center gap-2">
+    <span id="net-pill" class="hidden md:inline-flex items-center gap-1.5 px-2 py-1 bg-surface-container-low border border-outline-variant/40 rounded-lg text-on-surface-variant mono text-xs">
+      <span class="w-1.5 h-1.5 rounded-full bg-primary-container"></span><span>NEAR testnet</span>
+    </span>
+    <span class="inline-flex items-center gap-1.5 px-2 py-1 bg-amber-50 border border-amber-300 rounded-lg text-amber-800 text-xs font-medium"
+          title="This console never holds a key. Owner actions are emitted as CLI commands you run yourself.">
+      <span class="material-symbols-outlined text-[14px]">lock</span>Read-only
+    </span>
+    <input id="owner-input" class="w-[260px] px-3 py-1.5 bg-surface-container-lowest border border-outline-variant/50 rounded-lg mono text-xs focus:outline-none focus:ring-1 focus:ring-primary" placeholder="keyring account" />
+    <button id="load-btn" class="px-3 py-1.5 rounded-lg bg-on-surface text-surface font-medium text-xs hover:bg-inverse-surface transition-colors flex items-center gap-1">
+      <span class="material-symbols-outlined text-[16px]">sync</span>Load
+    </button>
+  </div>
+</header>
+
+<main class="flex-1 px-6 py-6 max-w-[1600px] w-full mx-auto space-y-5">
+
+  <div id="banner" hidden class="p-3 rounded-xl flex items-start gap-2"></div>
+
+  <!-- ── overview ── -->
+  <section data-panel="overview" class="space-y-5">
+    <div>
+      <h1 class="text-2xl font-semibold tracking-tight">Overview</h1>
+      <p class="text-secondary mt-1 max-w-3xl">Live state read from the Keyring contract on NEAR testnet. Every figure below is computed from contract data, never cached or estimated.</p>
+    </div>
+    <div id="tiles" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"></div>
+
+    <div class="p-5 rounded-xl bg-surface-container-lowest shadow-sm">
+      <div class="flex items-center gap-2 text-primary font-semibold mb-1">
+        <span class="material-symbols-outlined text-[20px]">policy</span>
+        <span>Where enforcement happens</span>
+      </div>
+      <p class="text-secondary max-w-4xl">
+        Policy lives in a NEAR smart contract. An agent asks for a transfer; the contract evaluates it, and
+        only then builds the transaction itself and calls NEAR Chain Signatures. Execution settles on the
+        destination chain — Base Sepolia or Bitcoin testnet4 — never on NEAR. The agent holds no key and
+        never supplies calldata, a preimage or a hash.
+      </p>
+    </div>
+
+    <div id="budget-section" class="p-5 rounded-xl bg-surface-container-lowest shadow-sm space-y-3"></div>
+  </section>
+
+  <!-- ── agents ── -->
+  <section data-panel="agents" hidden class="space-y-5">
+    <div class="flex flex-col md:flex-row md:items-center justify-between gap-3">
+      <div>
+        <h1 class="text-2xl font-semibold tracking-tight">Agents</h1>
+        <p class="text-secondary mt-1 max-w-3xl">Cryptographic identities operating under this Keyring, with the policy boundary enforced for each.</p>
+      </div>
+    </div>
+    <div id="agents-list" class="space-y-4"></div>
+  </section>
+
+  <!-- ── activity ── -->
+  <section data-panel="activity" hidden class="space-y-5">
+    <div>
+      <h1 class="text-2xl font-semibold tracking-tight">Activity</h1>
+      <p class="text-secondary mt-1 max-w-3xl">Every request the contract recorded, with the exact rule that refused it. A refusal is a result, not an error.</p>
+    </div>
+    <div id="activity-table" class="bg-surface-container-lowest rounded-xl shadow-sm overflow-hidden"></div>
+  </section>
+
+  <!-- ── owner actions ── -->
+  <section data-panel="actions" hidden class="space-y-5">
+    <div>
+      <h1 class="text-2xl font-semibold tracking-tight">Owner actions</h1>
+      <p class="text-secondary mt-1 max-w-3xl">This console holds no key and signs nothing. It composes the exact command for you to run, so the owner's key never leaves your machine.</p>
+    </div>
+
+    <div class="p-4 rounded-xl bg-amber-50 text-amber-900 flex items-start gap-3">
+      <span class="material-symbols-outlined text-[20px] text-amber-600 flex-shrink-0 mt-0.5">shield</span>
+      <div>
+        <strong class="font-semibold">Never paste a private key into a web page.</strong>
+        Keyring registers and policy-gates <em>public</em> keys only. Owner authority comes from
+        <span class="mono">predecessor_account_id()</span> on the contract call, so every action below must
+        be signed by the owner account itself.
+      </div>
+    </div>
+
+    <div id="actions-list" class="space-y-4"></div>
+  </section>
+</main>
+
+<footer class="px-6 py-4 text-xs text-secondary border-t border-outline-variant/40">
+  Keyring — policy-enforced wallet infrastructure for AI agents. Testnet only; nothing here has been audited.
+</footer>
+</div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
