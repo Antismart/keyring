@@ -16,9 +16,32 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { keccak256, serializeTransaction } from "viem";
+import { encodeFunctionData, keccak256, parseAbi, serializeTransaction } from "viem";
 
 const BASE_SEPOLIA = 84532;
+
+const ERC20 = parseAbi(["function transfer(address to, uint256 amount) returns (bool)"]);
+
+/** Builds an ERC-20 transfer case: the tx targets the token, value is zero. */
+function erc20Case({ name, note, nonce, token, recipient, amount, gas, maxFeePerGas, maxPriorityFeePerGas }) {
+  return {
+    name,
+    note,
+    token,
+    recipient,
+    token_amount: amount.toString(),
+    tx: {
+      chainId: BASE_SEPOLIA,
+      nonce,
+      to: token,
+      value: 0n,
+      gas,
+      maxFeePerGas,
+      maxPriorityFeePerGas,
+      data: encodeFunctionData({ abi: ERC20, functionName: "transfer", args: [recipient, amount] }),
+    },
+  };
+}
 
 /** Cases chosen to exercise RLP's awkward edges, not just a happy path. */
 const cases = [
@@ -87,6 +110,28 @@ const cases = [
       maxPriorityFeePerGas: 127n,
     },
   },
+  erc20Case({
+    name: "erc20_transfer",
+    note: "calldata composed by the contract; tx targets the token, value 0",
+    nonce: 7,
+    token: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    recipient: "0x1111111111111111111111111111111111111111",
+    amount: 1000000n,
+    gas: 65000n,
+    maxFeePerGas: 1000000000n,
+    maxPriorityFeePerGas: 1000000n,
+  }),
+  erc20Case({
+    name: "erc20_large_amount",
+    note: "a u128-max token amount, to exercise the 32-byte uint encoding",
+    nonce: 0,
+    token: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    recipient: "0x2222222222222222222222222222222222222222",
+    amount: 340282366920938463463374607431768211455n,
+    gas: 100000n,
+    maxFeePerGas: 7n,
+    maxPriorityFeePerGas: 0n,
+  }),
 ];
 
 /** A fixed signature, used only to check the signed encoding's shape. */
@@ -96,12 +141,14 @@ const SIGNATURE = {
   yParity: 1,
 };
 
-const fixtures = cases.map(({ name, note, tx }) => {
+const fixtures = cases.map(({ name, note, tx, token, recipient, token_amount }) => {
   const unsigned = serializeTransaction({ ...tx, type: "eip1559" });
   const signed = serializeTransaction({ ...tx, type: "eip1559" }, SIGNATURE);
   return {
     name,
     note,
+    ...(token ? { token, recipient, token_amount } : {}),
+    ...(tx.data ? { calldata: tx.data } : {}),
     chain_id: tx.chainId,
     nonce: Number(tx.nonce),
     to: tx.to,

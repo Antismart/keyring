@@ -48,6 +48,20 @@ pub const MIN_TRANSFER_GAS: u64 = 21_000;
 /// a caller padding slightly is not refused.
 pub const MAX_TRANSFER_GAS: u64 = 200_000;
 
+/// Conservative gas floor for an ERC-20 `transfer` call.
+///
+/// Above the 21000 intrinsic cost because a token transfer also pays for its
+/// calldata and for running the token's code. A lower bound, not an estimate:
+/// refusing a valid request would be worse than letting the fee cap bound an
+/// over-generous one.
+pub const MIN_ERC20_GAS: u64 = 30_000;
+
+/// Upper bound on gas for an ERC-20 transfer.
+///
+/// Looser than the native bound because token implementations vary widely.
+/// The fee cap is what actually bounds the cost.
+pub const MAX_ERC20_GAS: u64 = 300_000;
+
 /// Gas parameters for an EVM transfer, supplied by the caller.
 ///
 /// These come from the semi-trusted SDK/relayer, which reads them from an RPC.
@@ -79,10 +93,10 @@ impl EvmParamsError {
     pub fn message(&self) -> String {
         match self {
             EvmParamsError::GasLimitTooLow => {
-                format!("gas_limit must be at least {MIN_TRANSFER_GAS}")
+                "gas_limit is below the minimum this call could possibly use".to_string()
             }
             EvmParamsError::GasLimitTooHigh => {
-                format!("gas_limit must not exceed {MAX_TRANSFER_GAS}")
+                "gas_limit exceeds the maximum accepted for this call".to_string()
             }
             EvmParamsError::PriorityFeeAboveMaxFee => {
                 "max_priority_fee_per_gas must not exceed max_fee_per_gas".to_string()
@@ -95,14 +109,18 @@ impl EvmParamsError {
 
 impl EvmParams {
     /// Validates the parameters against EIP-1559's own rules and our bounds.
-    pub fn validate(&self) -> Result<(), EvmParamsError> {
+    ///
+    /// Gas bounds depend on what the transaction does, so the kind is required:
+    /// a token transfer needs more gas than a native one, and bounding both by
+    /// the native figure would refuse valid token transfers.
+    pub fn validate(&self, kind: EvmCallKind) -> Result<(), EvmParamsError> {
         if self.max_fee_per_gas.0 == 0 {
             return Err(EvmParamsError::ZeroMaxFee);
         }
-        if self.gas_limit.0 < MIN_TRANSFER_GAS {
+        if self.gas_limit.0 < kind.min_gas() {
             return Err(EvmParamsError::GasLimitTooLow);
         }
-        if self.gas_limit.0 > MAX_TRANSFER_GAS {
+        if self.gas_limit.0 > kind.max_gas() {
             return Err(EvmParamsError::GasLimitTooHigh);
         }
         // EIP-1559 requires the tip to be no greater than the total fee cap.
@@ -183,26 +201,138 @@ pub fn rlp_uint(value: u128) -> Vec<u8> {
 
 // ------------------------------------------------------------- transaction
 
-/// An EIP-1559 (type 2) transfer, built from validated fields.
+/// What an EIP-1559 transaction does.
 ///
-/// `data` is intentionally absent: Keyring builds plain value transfers only.
-/// There is no field for calldata, so no caller can attach any. ERC-20
-/// transfers would require composing a `transfer` call here from a validated
-/// token address, recipient and amount (invariant 7); that is not implemented.
+/// # Invariant 7, enforced by the type
+///
+/// There is no variant carrying caller-supplied bytes. Calldata exists only for
+/// [`EvmCall::Erc20Transfer`], where it is *composed here* from a validated
+/// token address, recipient and amount. A caller has no field in which to put
+/// calldata, so it cannot attach any — the guarantee is structural rather than
+/// a runtime check that could be bypassed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Eip1559Transfer {
+pub enum EvmCall {
+    /// Send the chain's native coin.
+    NativeTransfer {
+        to: [u8; 20],
+        /// Value in wei, exactly as policy approved it.
+        value: u128,
+    },
+    /// Call `transfer(address,uint256)` on an ERC-20 contract.
+    Erc20Transfer {
+        /// The token contract, from the agent's asset policy.
+        token: [u8; 20],
+        /// The recipient, from the request's validated destination.
+        to: [u8; 20],
+        /// Amount in the token's base units, exactly as policy approved it.
+        amount: u128,
+    },
+}
+
+/// Which kind of call a transaction makes, independent of its addresses.
+///
+/// Gas bounds depend only on this, which lets parameters be validated — and
+/// the fee derived — before the destination has been parsed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvmCallKind {
+    Native,
+    Erc20,
+}
+
+impl EvmCallKind {
+    /// Smallest gas limit that could possibly succeed.
+    ///
+    /// 21000 is the intrinsic cost of any transaction. A token transfer also
+    /// pays for its calldata and for executing the token's code, so its floor
+    /// is higher. Both are conservative lower bounds rather than estimates:
+    /// refusing a valid request would be worse than letting the fee cap bound
+    /// an over-generous one.
+    pub const fn min_gas(&self) -> u64 {
+        match self {
+            EvmCallKind::Native => MIN_TRANSFER_GAS,
+            EvmCallKind::Erc20 => MIN_ERC20_GAS,
+        }
+    }
+
+    /// Largest accepted gas limit.
+    pub const fn max_gas(&self) -> u64 {
+        match self {
+            EvmCallKind::Native => MAX_TRANSFER_GAS,
+            EvmCallKind::Erc20 => MAX_ERC20_GAS,
+        }
+    }
+}
+
+/// `keccak256("transfer(address,uint256)")[..4]`.
+///
+/// Hard-coded rather than computed: it is a fixed constant of the ERC-20
+/// standard, and a test asserts it against the hash to catch a typo.
+pub const ERC20_TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
+
+/// Builds the calldata for a standard ERC-20 transfer.
+///
+/// ABI encoding: the 4-byte selector, then the recipient left-padded to 32
+/// bytes, then the amount as a 32-byte big-endian integer.
+pub fn erc20_transfer_calldata(to: &[u8; 20], amount: u128) -> Vec<u8> {
+    let mut data = Vec::with_capacity(4 + 32 + 32);
+    data.extend_from_slice(&ERC20_TRANSFER_SELECTOR);
+    // address: 12 zero bytes of padding, then the 20 address bytes.
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(to);
+    // uint256: a u128 left-padded into 32 bytes.
+    data.extend_from_slice(&[0u8; 16]);
+    data.extend_from_slice(&amount.to_be_bytes());
+    data
+}
+
+impl EvmCall {
+    pub const fn kind(&self) -> EvmCallKind {
+        match self {
+            EvmCall::NativeTransfer { .. } => EvmCallKind::Native,
+            EvmCall::Erc20Transfer { .. } => EvmCallKind::Erc20,
+        }
+    }
+
+    /// The transaction's `to` field: the recipient, or the token contract.
+    pub fn tx_to(&self) -> [u8; 20] {
+        match self {
+            EvmCall::NativeTransfer { to, .. } => *to,
+            // A token transfer is a call to the token, so the recipient lives
+            // in the calldata rather than in `to`.
+            EvmCall::Erc20Transfer { token, .. } => *token,
+        }
+    }
+
+    /// The transaction's `value` field. Always zero for a token transfer.
+    pub fn tx_value(&self) -> u128 {
+        match self {
+            EvmCall::NativeTransfer { value, .. } => *value,
+            EvmCall::Erc20Transfer { .. } => 0,
+        }
+    }
+
+    /// The transaction's calldata. Empty for a native transfer.
+    pub fn tx_data(&self) -> Vec<u8> {
+        match self {
+            EvmCall::NativeTransfer { .. } => Vec::new(),
+            EvmCall::Erc20Transfer { to, amount, .. } => erc20_transfer_calldata(to, *amount),
+        }
+    }
+}
+
+/// An EIP-1559 (type 2) transaction, built from validated fields.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Eip1559Transaction {
     pub chain_id: u64,
     pub nonce: u64,
     pub max_priority_fee_per_gas: u128,
     pub max_fee_per_gas: u128,
     pub gas_limit: u64,
-    /// Recipient, exactly as policy approved it.
-    pub to: [u8; 20],
-    /// Value in wei, exactly as policy approved it.
-    pub value: u128,
+    /// What the transaction does. The only source of `to`, `value` and `data`.
+    pub call: EvmCall,
 }
 
-impl Eip1559Transfer {
+impl Eip1559Transaction {
     /// The RLP payload shared by the signing preimage and the signed encoding.
     fn base_fields(&self) -> Vec<u8> {
         let mut p = Vec::new();
@@ -211,10 +341,10 @@ impl Eip1559Transfer {
         p.extend_from_slice(&rlp_uint(self.max_priority_fee_per_gas));
         p.extend_from_slice(&rlp_uint(self.max_fee_per_gas));
         p.extend_from_slice(&rlp_uint(u128::from(self.gas_limit)));
-        p.extend_from_slice(&rlp_bytes(&self.to));
-        p.extend_from_slice(&rlp_uint(self.value));
-        p.extend_from_slice(&rlp_bytes(&[])); // data: empty
-        p.extend_from_slice(&rlp_list(&[])); // access_list: empty
+        p.extend_from_slice(&rlp_bytes(&self.call.tx_to()));
+        p.extend_from_slice(&rlp_uint(self.call.tx_value()));
+        p.extend_from_slice(&rlp_bytes(&self.call.tx_data()));
+        p.extend_from_slice(&rlp_list(&[])); // access_list: always empty
         p
     }
 
@@ -237,11 +367,11 @@ impl Eip1559Transfer {
     ///
     /// Provided so tests can assert that the signed encoding still carries the
     /// approved recipient and value. The SDK assembles the same bytes for
-    /// broadcast; both are checked against viem fixtures.
+    /// broadcast, and both are checked against viem fixtures.
     pub fn signed_encoding(&self, r: &[u8; 32], s: &[u8; 32], y_parity: u8) -> Vec<u8> {
         let mut p = self.base_fields();
         p.extend_from_slice(&rlp_uint(u128::from(y_parity)));
-        // r and s are encoded as minimal integers, not fixed 32-byte strings.
+        // r and s are minimal integers, not fixed 32-byte strings.
         p.extend_from_slice(&rlp_bytes(strip_leading_zeros(r)));
         p.extend_from_slice(&rlp_bytes(strip_leading_zeros(s)));
         let mut out = vec![0x02];
