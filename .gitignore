@@ -1,0 +1,26 @@
+# Rust
+/target
+**/target
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Secrets — never commit anything but .env.example
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+neardev/
+.near-credentials/
+
+# Build artifacts
+*.wasm
+!tests/fixtures/*.wasm
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

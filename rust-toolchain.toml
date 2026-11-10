@@ -1,0 +1,7 @@
+[toolchain]
+# near-sdk 5.30.1 (what `near-sdk = "5.23"` resolves to) requires rustc >= 1.95,
+# so the 1.86 pin that `cargo near new` generates cannot build it. See
+# docs/security-decisions.md "Toolchain pin" for the full discrepancy.
+channel = "1.99"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
