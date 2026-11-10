@@ -171,19 +171,23 @@ Read `docs/threat-model.md` for the full list. The ones that matter most:
 
 1. **A compromised agent key can still spend the remaining 24-hour budget** to an
    allowlisted destination. Keyring bounds blast radius; it does not eliminate it.
-2. **Bitcoin fee caps would rest on UTXO data the contract cannot verify.** Open
+2. **Budgets are per agent and per chain — there is no owner-wide cap.** An owner
+   running N agents each capped at C per 24h is exposed to N x C. A policy that
+   reads as "2 ETH per 24h" limits that *agent*, not the keyring. An aggregate
+   owner-level budget is a candidate future capability, not current behaviour.
+3. **Bitcoin fee caps would rest on UTXO data the contract cannot verify.** Open
    issue, must be resolved before any Bitcoin claim (`security-decisions.md` §8).
-3. **Replay protection is bounded** at 32 idempotency keys per agent. The uncaught
+4. **Replay protection is bounded** at 32 idempotency keys per agent. The uncaught
    case is a second within-policy payment, never an over-limit one.
-4. **A failed broadcast still consumes budget** until the window rolls. Deliberate:
+5. **A failed broadcast still consumes budget** until the window rolls. Deliberate:
    refunding on a relayer's report would let a hostile relayer mint spend capacity.
-5. **Transaction-construction invariants are not yet proven by tests** — only by
+6. **Transaction-construction invariants are not yet proven by tests** — only by
    the absence of dangerous parameters. Gate D/E must close this.
-6. **A failed signing keeps its budget reservation.** The contract cannot prove
+7. **A failed signing keeps its budget reservation.** The contract cannot prove
    the MPC network never assembled a signature, so releasing budget could
    authorise the same spend twice. A failed signing therefore consumes budget
    until the window rolls.
-7. **The MPC wire types are mirrored, not imported.** The official
+8. **The MPC wire types are mirrored, not imported.** The official
    `near-mpc-sdk` 0.0.1 does not compile against near-sdk 5.30.1. The schemas
    were read from the deployed signer's own ABI and are pinned by tests, but
    must be re-checked when the signer is upgraded.

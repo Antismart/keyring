@@ -268,3 +268,50 @@ the signer for the same path with `predecessor` set to the agent account
 returns a **different** key from the one bound to the Keyring contract, because
 the signer derives every key from its own caller. An agent calling the signer
 directly therefore cannot reach a Keyring key.
+
+## 19. Budgets are per agent and per chain, not per owner
+
+**Settled for the MVP.** The rolling 24-hour ledger lives on `Agent.ledgers`,
+keyed by chain, and `evaluate` is handed one agent's entries for one chain and
+nothing else. There is no owner-wide or keyring-wide aggregate budget.
+
+**What follows from that:** an owner running N agents, each capped at C per 24
+hours on a chain, is exposed to **N x C** on that chain in a day. The cap bounds
+an *agent*, not a *keyring*. For a single-agent keyring the two are identical,
+which is exactly why the distinction is easy to miss when reading a policy that
+says "2 ETH per 24h".
+
+This is the right default for the MVP rather than an oversight. Per-agent
+budgets are what make an agent's authority independently reasoned about,
+independently revocable, and independently auditable. A shared pool introduces
+coupling: one busy agent could exhaust the allowance of an unrelated one, and a
+refusal would then depend on the behaviour of an agent the caller knows nothing
+about, which makes refusals much harder to explain.
+
+It is, however, a genuine capability gap for an owner who wants a ceiling on
+total programme spend rather than per-agent spend. Recorded here so the limit is
+stated rather than assumed, and pinned by
+`each_agent_has_its_own_budget_and_there_is_no_owner_wide_cap` in the access
+control suite, which must fail if an aggregate budget is ever introduced.
+
+### If an owner-wide budget is added later
+
+Three parts of the current design need attention:
+
+1. **`evaluate` stops being a pure function of one agent's state.** It would
+   need the owner's other ledgers too. The signature already takes spend entries
+   as a parameter, so the shape survives, but the caller must assemble more and
+   the evaluation order needs a defined position for the new rule — almost
+   certainly after the per-agent cap, so the narrower limit still reports first.
+2. **Bounded storage gets harder.** `MAX_SPEND_ENTRIES` is 64 per agent per
+   chain, so an owner-wide scan across 16 agents could touch 1024 entries on
+   every request. A rolled-up per-owner counter, maintained on reserve and
+   pruned on a schedule, is the workable shape; scanning is not.
+3. **Decision 7 becomes load-bearing.** Revoking an agent currently destroys its
+   ledger. With an owner-wide budget that must *not* reduce the owner-level
+   total, or revoke-and-re-register becomes a budget reset for the whole
+   keyring rather than just for one agent.
+
+Concurrency is not a concern: NEAR executes calls to one contract account
+sequentially, so an owner-level counter would be as race-free as the per-agent
+ledger is today (threat T4).

@@ -78,6 +78,11 @@ an allowlisted destination before the owner notices. Keyring reduces blast
 radius; it does not eliminate it. Allowlisting only addresses the owner controls
 or genuinely intends to pay is what makes this bound meaningful.
 
+**The bound is per agent, not per owner.** Budgets live on the agent and are
+keyed by chain; there is no owner-wide aggregate cap. An owner running N agents
+each capped at C per 24 hours is exposed to N x C on that chain, and compromise
+of several agent keys at once scales accordingly. See security decision 19.
+
 Tests: `successive_requests_cannot_exceed_the_rolling_cap_in_aggregate`,
 `a_disabled_agent_cannot_obtain_a_new_request`.
 
@@ -211,7 +216,8 @@ compromised *owner*.
 ## Residual risks, stated plainly
 
 1. A compromised agent key can spend the remaining 24-hour budget to an
-   allowlisted destination.
+   allowlisted destination. The cap bounds one agent, not the whole keyring:
+   total owner exposure is the sum across agents (decision 19).
 2. Bitcoin fee caps rest on UTXO data the contract cannot verify (decision 8).
 3. Replay protection is bounded at 32 keys per agent (decision 6).
 4. A failed broadcast still consumes budget until the window rolls (decision 4).
