@@ -32,7 +32,7 @@ This is early, honest-about-itself infrastructure. What exists today:
 | ✅ **ERC-20 transfers** | Calldata composed in-contract, matches **viem** exactly; signed on testnet |
 | ✅ **Bitcoin testnet4** | BIP143 sighash matches **bitcoinjs-lib**; signed on testnet and verified |
 | ✅ **Owner-wide budgets** | A keyring-wide cap across all agents, enforced on testnet |
-| ✅ **Bitcoin spend on testnet4** | [Broadcast and accepted](https://mempool.space/testnet4/tx/15061f1f6bb2fd892018621bb8523dff7ddef6bf0d672f01b56441eb225aaeee) — 50,000 sat paid, change returned, 500 sat fee |
+| ✅ **Bitcoin spend on testnet4** | [Confirmed in block 160377](https://mempool.space/testnet4/tx/15061f1f6bb2fd892018621bb8523dff7ddef6bf0d672f01b56441eb225aaeee) — 50,000 sat paid, change returned, 500 sat fee |
 
 **Nothing here has been audited, and nothing has touched mainnet or real
 value.** 119 tests pass, and the end-to-end path is real: an agent requested a
@@ -249,7 +249,7 @@ it to be manipulated into calling.
 |---|---|
 | Base Sepolia — native ETH | Built, verified against viem, **payment landed on chain** |
 | Base Sepolia — ERC-20 | Built, verified against viem, signed on testnet |
-| Bitcoin testnet4 — P2WPKH | Built, verified against bitcoinjs-lib, **spend accepted by the network** |
+| Bitcoin testnet4 — P2WPKH | Built, verified against bitcoinjs-lib, **spend confirmed in a block** |
 
 Bitcoin is one input, native segwit, one payment plus change to the Keyring's
 own address. Multiple inputs are not supported rather than half-supported.
@@ -259,10 +259,10 @@ spends.
 The Bitcoin address for the reference deployment is
 `tb1qthnksfdpen20ka34h9dhapdgttwxcdr4z4nhgm`.
 
-Mempool acceptance is worth stating precisely: Bitcoin nodes validate scripts
-and signatures in full before admitting a transaction, so the network verified
-the sighash this contract built and the signature the MPC network produced
-against the real UTXO.
+Worth stating precisely: Bitcoin nodes validate scripts and signatures in full
+before admitting a transaction, so correctness was established the moment the
+network accepted it; the block that followed added durability. The address
+holds the change and can spend again.
 
 ## Known limitations
 
@@ -277,7 +277,7 @@ Read `docs/threat-model.md` for the full list. The ones that matter most:
 3. **No ERC-20 transfer has been broadcast.** The transaction is constructed,
    signed and verified against viem, but the derived address holds no test
    tokens, so none has been sent. Native ETH and Bitcoin spends have both
-   landed on their networks.
+   been confirmed in blocks on their networks.
 4. **Bitcoin is one input, native segwit only.** Multiple inputs are not
    supported rather than half-supported, and bech32m (Taproot) destinations are
    refused.

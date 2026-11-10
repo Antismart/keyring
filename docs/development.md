@@ -84,7 +84,7 @@ credentials and no network.
 | B — policy correctness | **Met.** 72 Rust tests: every rule at both sides of its boundary, access control, aggregate budget, MPC success and failure paths. Partial signing does not apply to the single-payload secp256k1 flow. |
 | C — real NEAR signing | **Met.** Deployed to testnet, real signature from the live signer, callback lifecycle tested, signature independently verified, no direct agent-to-MPC path. |
 | D — Base Sepolia e2e | **Met.** EIP-1559 built in-contract and matched against viem, signed by the live MPC network, included in block 56892318. Destination, per-request and fee-cap refusals all returned before signing. |
-| E — Bitcoin e2e | **Met.** BIP143 sighash matched against bitcoinjs-lib, signed by the live MPC network, and a spend accepted by the testnet4 network with outputs and fee cap enforced. |
+| E — Bitcoin e2e | **Met.** BIP143 sighash matched against bitcoinjs-lib, signed by the live MPC network, and a spend confirmed in testnet4 block 160377 with outputs and fee cap enforced. |
 | ERC-20 | **Met in construction.** Calldata composed in-contract, matched against viem, signed on testnet. Not broadcast: no test tokens held. |
 | Owner-wide budgets | **Met.** Enforced on testnet; refused a request the agent's own cap allowed. |
 | F — agent workflow | **Met.** MCP server implemented over stdio and driven against the deployed contract; `evals/transcript.md` records a real payment, three refusals, owner revocation and the audit trail. |

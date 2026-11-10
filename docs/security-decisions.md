@@ -567,7 +567,8 @@ signs a hash rather than producing the DER encoding.
 
 ## 31. Bitcoin end to end, verified on testnet4
 
-**A Bitcoin spend built by the contract was accepted by the testnet4 network.**
+**A Bitcoin spend built by the contract was confirmed on testnet4, in block
+160377.**
 
 | | |
 |---|---|
@@ -577,14 +578,17 @@ signs a hash rather than producing the DER encoding.
 | Payment | 50,000 sat to the policy-approved destination |
 | Change | 153,354 sat back to the Keyring address |
 | Fee | 500 sat over 140 vbytes, within the 5,000 sat cap |
+| Block | 160377 |
 
-Mempool acceptance is the substantive result, not merely a step toward it.
-Bitcoin nodes fully validate scripts and signatures before admitting a
-transaction to the mempool, so acceptance means the network itself verified the
-BIP143 sighash this contract constructed and the signature the MPC network
-produced, against the real UTXO. A wrong sighash, a misreported input amount, a
-malformed witness or a high-S signature would each have been rejected there.
+Two separate facts are worth keeping distinct. Mempool acceptance already
+established correctness: Bitcoin nodes fully validate scripts and signatures
+before admitting a transaction, so the network verified the BIP143 sighash this
+contract constructed and the signature the MPC network produced, against the
+real UTXO. A wrong sighash, a misreported input amount, a malformed witness or
+a high-S signature would each have been rejected there. Confirmation then
+added durability: the spend is in a block.
 
 The chain's own record confirms the outputs are exactly what policy approved:
 the payment to the allowlisted destination and change back to the Keyring's own
-derived address, with no third output.
+derived address, with no third output. The Keyring address holds the 153,354
+sat of change, so the contract can spend from it again.
