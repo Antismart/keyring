@@ -30,6 +30,7 @@
 //! unreachable until Gate C verifies the real signer interface.
 
 pub mod events;
+pub mod mpc;
 pub mod policy;
 pub mod signer;
 pub mod state;
@@ -37,11 +38,15 @@ pub mod types;
 
 use near_sdk::json_types::U128;
 use near_sdk::store::IterableMap;
-use near_sdk::{env, near, require, AccountId, PanicOnDefault, PublicKey};
+use near_sdk::{
+    env, near, require, AccountId, PanicOnDefault, Promise, PromiseError, PromiseOrValue, PublicKey,
+};
 
 use policy::{evaluate, validate_policy, Decision, Policy, Refusal, RefusalCode, TransferIntent};
 use signer::SignerBackend;
-use state::{Agent, Keyring, RequestStatus, TransferRequest, MAX_AGENTS_PER_KEYRING};
+use state::{
+    Agent, Keyring, RequestStatus, StoredSignature, TransferRequest, MAX_AGENTS_PER_KEYRING,
+};
 use types::{normalize_destination, Chain, MAX_IDEMPOTENCY_KEY_LEN, MAX_LABEL_LEN};
 
 /// What a caller gets back from `request_transfer`.
@@ -62,6 +67,15 @@ pub enum RequestOutcome {
     /// This idempotency key was already used by this agent; the original
     /// request is returned instead of creating a second one.
     Duplicate { request_id: u64 },
+    /// Policy passed and the MPC network produced a signature.
+    ///
+    /// This does not mean the destination-chain transaction was broadcast or
+    /// confirmed (invariant 13).
+    Signed { request_id: u64 },
+    /// Policy passed but signing did not complete.
+    ///
+    /// The budget reservation is **retained**; see `on_signed`.
+    SigningFailed { request_id: u64, reason: String },
 }
 
 /// What a caller gets back from the `simulate_transfer` view.
@@ -237,7 +251,7 @@ impl Contract {
         amount: U128,
         fee: U128,
         idempotency_key: String,
-    ) -> RequestOutcome {
+    ) -> PromiseOrValue<RequestOutcome> {
         require!(
             idempotency_key.len() <= MAX_IDEMPOTENCY_KEY_LEN && !idempotency_key.is_empty(),
             "idempotency_key must be 1..=64 characters"
@@ -268,10 +282,14 @@ impl Contract {
 
         // Replay protection before anything else is recorded.
         if let Some(existing) = agent.find_idempotency(&idempotency_key) {
-            return RequestOutcome::Duplicate {
+            return PromiseOrValue::Value(RequestOutcome::Duplicate {
                 request_id: existing,
-            };
+            });
         }
+
+        // Captured before the mutable borrow ends; the derivation path is built
+        // from contract state, never from a caller parameter.
+        let agent_label = agent.label.clone();
 
         agent.prune_expired(now);
 
@@ -329,6 +347,9 @@ impl Contract {
             created_at_ms: now,
             updated_at_ms: now,
             refusal: refusal.clone(),
+            signature: None,
+            failure_reason: None,
+            payload_hex: None,
         };
 
         self.requests.insert(request_id, request);
@@ -337,38 +358,155 @@ impl Contract {
         }
         self.next_request_id += 1;
 
-        match refusal {
-            Some(r) => {
-                events::request_refused(
+        if let Some(r) = refusal {
+            events::request_refused(
+                request_id,
+                &owner,
+                &agent_pk,
+                chain,
+                &stored_destination,
+                amount,
+                fee,
+                &r,
+            );
+            return PromiseOrValue::Value(RequestOutcome::Refused {
+                request_id,
+                refusal: r,
+            });
+        }
+
+        events::request_created(
+            request_id,
+            &owner,
+            &agent_pk,
+            chain,
+            &stored_destination,
+            amount,
+            fee,
+            U128(reserved),
+        );
+        events::request_status_changed(request_id, &status);
+
+        // The payload is derived here, from fields policy has already approved.
+        // The caller contributed no bytes to it.
+        let payload = signer::gate_c_commitment(
+            &env::current_account_id(),
+            request_id,
+            chain.as_str(),
+            &stored_destination,
+            amount.0,
+            fee.0,
+        );
+        let payload_hex = mpc::to_hex(&payload);
+        let path = signer::derivation_path(&owner, &agent_label, chain.as_str());
+
+        if let Some(req) = self.requests.get_mut(&request_id) {
+            req.payload_hex = Some(payload_hex.clone());
+        }
+
+        match self.signer.clone() {
+            SignerBackend::Mock => {
+                // Completes the lifecycle synchronously so local tests cover
+                // the Signed state. The stored signature is flagged mock.
+                let sig = signer::mock_signature(&payload, &path);
+                let stored = StoredSignature {
+                    scheme: "Secp256k1".to_string(),
+                    big_r: mpc::to_hex(sig[..32].try_into().expect("32 bytes")),
+                    s: mpc::to_hex(sig[32..].try_into().expect("32 bytes")),
+                    recovery_id: 0,
+                    mock: true,
+                };
+                self.finish_signed(request_id, stored);
+                PromiseOrValue::Value(RequestOutcome::Signed { request_id })
+            }
+            SignerBackend::Mpc { contract_id } => {
+                self.set_status(request_id, RequestStatus::Signing);
+                let args = near_sdk::serde_json::to_vec(&near_sdk::serde_json::json!({
+                    "request": mpc::sign_args(path, payload_hex),
+                }))
+                .expect("sign args serialise");
+
+                // The contract attaches the signer's deposit from its own
+                // balance. request_transfer is not #[payable], so an agent
+                // neither supplies nor influences it (CLAUDE.md section 4).
+                PromiseOrValue::Promise(
+                    Promise::new(contract_id)
+                        .function_call(
+                            mpc::SIGN_METHOD.to_string(),
+                            args,
+                            mpc::SIGN_DEPOSIT,
+                            mpc::SIGN_GAS,
+                        )
+                        .then(
+                            Self::ext(env::current_account_id())
+                                .with_static_gas(mpc::CALLBACK_GAS)
+                                .on_signed(request_id),
+                        ),
+                )
+            }
+        }
+    }
+
+    /// Callback for the MPC signer's response.
+    ///
+    /// # Access control
+    ///
+    /// `#[private]` makes the near-sdk wrapper reject any predecessor other
+    /// than this contract. That wrapper check only exists in the compiled wasm
+    /// export, so an explicit `require!` is kept as well: the same guarantee,
+    /// but one a unit test can actually exercise (invariant 16).
+    ///
+    /// # Budget on failure
+    ///
+    /// The reservation is **retained** when signing fails. The contract cannot
+    /// establish that no usable signature was produced -- a yield that timed
+    /// out locally does not prove the MPC network never assembled one -- and
+    /// CLAUDE.md section 6 requires the conservative reservation in exactly
+    /// that case. The consequence is that a failed signing consumes budget
+    /// until the 24-hour window rolls.
+    #[private]
+    pub fn on_signed(
+        &mut self,
+        request_id: u64,
+        #[callback_result] result: Result<mpc::SignatureResponse, PromiseError>,
+    ) -> RequestOutcome {
+        require!(
+            env::predecessor_account_id() == env::current_account_id(),
+            "on_signed is a private callback"
+        );
+
+        match result {
+            Ok(mpc::SignatureResponse::Secp256k1 {
+                big_r,
+                s,
+                recovery_id,
+            }) => {
+                let stored = StoredSignature {
+                    scheme: "Secp256k1".to_string(),
+                    big_r: big_r.affine_point,
+                    s: s.scalar,
+                    recovery_id,
+                    mock: false,
+                };
+                self.finish_signed(request_id, stored);
+                RequestOutcome::Signed { request_id }
+            }
+            Ok(mpc::SignatureResponse::Ed25519 { .. }) => {
+                // Unreachable for Keyring: requests always target the
+                // secp256k1 domain. Rejected rather than stored as valid.
+                let reason = "signer returned an Ed25519 signature for a secp256k1 request";
+                self.finish_failed(request_id, reason.to_string());
+                RequestOutcome::SigningFailed {
                     request_id,
-                    &owner,
-                    &agent_pk,
-                    chain,
-                    &stored_destination,
-                    amount,
-                    fee,
-                    &r,
-                );
-                RequestOutcome::Refused {
-                    request_id,
-                    refusal: r,
+                    reason: reason.to_string(),
                 }
             }
-            None => {
-                events::request_created(
+            Err(_) => {
+                let reason = "mpc signing failed or timed out";
+                self.finish_failed(request_id, reason.to_string());
+                RequestOutcome::SigningFailed {
                     request_id,
-                    &owner,
-                    &agent_pk,
-                    chain,
-                    &stored_destination,
-                    amount,
-                    fee,
-                    U128(reserved),
-                );
-                events::request_status_changed(request_id, &status);
-                RequestOutcome::Created {
-                    request_id,
-                    reserved: U128(reserved),
+                    reason: reason.to_string(),
                 }
             }
         }
@@ -531,6 +669,37 @@ impl Contract {
     }
 
     // ------------------------------------------------------------------ internal
+
+    /// Moves a request to a new status and emits the transition.
+    fn set_status(&mut self, request_id: u64, status: RequestStatus) {
+        if let Some(req) = self.requests.get_mut(&request_id) {
+            req.status = status.clone();
+            req.updated_at_ms = env::block_timestamp_ms();
+        }
+        events::request_status_changed(request_id, &status);
+    }
+
+    /// Records a signature and moves the request to `Signed`.
+    ///
+    /// The budget reservation made at authorisation is left untouched.
+    fn finish_signed(&mut self, request_id: u64, signature: StoredSignature) {
+        if let Some(req) = self.requests.get_mut(&request_id) {
+            req.status = RequestStatus::Signed;
+            req.signature = Some(signature);
+            req.updated_at_ms = env::block_timestamp_ms();
+        }
+        events::request_status_changed(request_id, &RequestStatus::Signed);
+    }
+
+    /// Moves the request to `Failed`, retaining its budget reservation.
+    fn finish_failed(&mut self, request_id: u64, reason: String) {
+        if let Some(req) = self.requests.get_mut(&request_id) {
+            req.status = RequestStatus::Failed;
+            req.failure_reason = Some(reason);
+            req.updated_at_ms = env::block_timestamp_ms();
+        }
+        events::request_status_changed(request_id, &RequestStatus::Failed);
+    }
 
     fn require_keyring_mut(&mut self, owner: &AccountId) -> &mut Keyring {
         self.keyrings

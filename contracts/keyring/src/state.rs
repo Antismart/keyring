@@ -202,6 +202,26 @@ pub enum RequestStatus {
     Failed,
 }
 
+/// A signature recorded against a request.
+///
+/// `mock` is part of the stored data, not merely a deployment-level flag, so
+/// that a mock signature cannot be mistaken for a real one by anything reading
+/// a request — a dashboard, an indexer or a demo transcript. A real signature
+/// and a mock one are distinguishable at the data level, permanently.
+#[near(serializers = [json, borsh])]
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct StoredSignature {
+    /// Always `Secp256k1` for the chains Keyring supports.
+    pub scheme: String,
+    /// Hex-encoded curve point `big_r`.
+    pub big_r: String,
+    /// Hex-encoded scalar `s`.
+    pub s: String,
+    pub recovery_id: u8,
+    /// True when produced by the mock backend. Never a valid signature.
+    pub mock: bool,
+}
+
 /// A transfer request and its audit record.
 #[near(serializers = [json, borsh])]
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -222,4 +242,18 @@ pub struct TransferRequest {
     pub updated_at_ms: u64,
     /// Present exactly when `status == Refused`.
     pub refusal: Option<Refusal>,
+    /// Present exactly when `status == Signed`.
+    ///
+    /// A signature here means the MPC network produced one. It does **not**
+    /// mean the destination-chain transaction was broadcast or confirmed
+    /// (invariant 13), and the reservation is never released on the strength
+    /// of it.
+    pub signature: Option<StoredSignature>,
+    /// Present exactly when `status == Failed`: why signing did not complete.
+    pub failure_reason: Option<String>,
+    /// The exact payload sent to the MPC signer, hex-encoded.
+    ///
+    /// Recorded so an auditor can independently verify that what was signed
+    /// corresponds to what policy approved (invariant 6).
+    pub payload_hex: Option<String>,
 }
