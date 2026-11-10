@@ -160,8 +160,10 @@ export function verifySignedTransaction(request: TransferRequest, raw: Hex): voi
   if (parsed.to?.toLowerCase() !== expected.to?.toLowerCase()) {
     mismatches.push(`to: ${parsed.to} != ${expected.to}`);
   }
-  if (parsed.value !== expected.value) {
-    mismatches.push(`value: ${parsed.value} != ${expected.value}`);
+  // viem omits `value` entirely when it is zero, which is exactly the token
+  // transfer case, so an undefined here means zero rather than a mismatch.
+  if ((parsed.value ?? 0n) !== (expected.value ?? 0n)) {
+    mismatches.push(`value: ${parsed.value ?? 0n} != ${expected.value ?? 0n}`);
   }
   if (parsed.chainId !== expected.chainId) {
     mismatches.push(`chainId: ${parsed.chainId} != ${expected.chainId}`);

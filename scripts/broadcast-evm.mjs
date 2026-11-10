@@ -63,9 +63,11 @@ async function view(contractId, method, args) {
 const request = await view(account, "get_request", { request_id: Number(requestIdArg) });
 if (!request) throw new Error(`request ${requestIdArg} not found`);
 
+const isToken = typeof request.asset === "object" && "erc20" in request.asset;
 console.log(`\nRequest #${request.id} on ${account}`);
+console.log(`  asset   ${isToken ? `ERC-20 ${request.asset.erc20.token}` : "native ETH"}`);
 console.log(`  to      ${request.destination}`);
-console.log(`  value   ${request.amount} wei`);
+console.log(`  amount  ${request.amount} ${isToken ? "token base units" : "wei"}`);
 console.log(`  fee cap ${request.fee} wei (gas_limit * max_fee_per_gas)`);
 console.log(`  status  ${request.status}`);
 console.log(`  mock    ${request.signature?.mock}\n`);

@@ -176,3 +176,19 @@ test("a token transfer sends no native value", () => {
   assert.equal(serializable.value, 0n);
   assert.equal(serializable.to.toLowerCase(), TOKEN_F.token.toLowerCase());
 });
+
+test("an untampered token transfer verifies against its request", () => {
+  // Regression: viem omits `value` from a parsed transaction when it is zero,
+  // which is every token transfer. Comparing it against 0n naively made this
+  // throw, blocking all ERC-20 broadcasts.
+  const req = tokenRequest();
+  verifySignedTransaction(req, buildSignedTransaction(req));
+});
+
+test("a token transfer with a non-zero value would still be caught", () => {
+  // The zero-value allowance must not weaken the check: a transaction whose
+  // value disagrees with the request is still a mismatch.
+  const req = tokenRequest();
+  const raw = buildSignedTransaction(request()); // a native transfer, non-zero value
+  assert.throws(() => verifySignedTransaction(req, raw), /value:|to:|calldata:/);
+});
