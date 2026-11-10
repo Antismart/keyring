@@ -545,3 +545,46 @@ one recomputed with bitcoinjs-lib from chain data, the signature verifies
 against the MPC-derived key, and the key recovered from the signature is the
 same key. What remains unproven is only that such a transaction is accepted by
 the Bitcoin network, which needs a funded UTXO.
+
+## 30. Bitcoin signatures must be normalised to low-S
+
+**Settled.** The relayer flips `s` to `n - s` when the MPC returns a high-S
+signature, before DER-encoding it into the witness.
+
+Bitcoin rejects high-S signatures under BIP62, as a malleability defence. The
+MPC network makes no guarantee about which half of the range it returns, and
+both are valid ECDSA signatures over the same message — so a relayer that
+skipped this step would produce transactions the network refuses roughly half
+the time, with an error that looks nothing like its cause.
+
+Normalisation is safe: `(r, s)` and `(r, n - s)` are both valid signatures for
+the same key and message, so flipping does not require a new signature from the
+MPC network.
+
+This lives in the relayer rather than the contract because it is an encoding
+rule of the destination chain, not a policy decision, and because the contract
+signs a hash rather than producing the DER encoding.
+
+## 31. Bitcoin end to end, verified on testnet4
+
+**A Bitcoin spend built by the contract was accepted by the testnet4 network.**
+
+| | |
+|---|---|
+| Keyring address | `tb1qthnksfdpen20ka34h9dhapdgttwxcdr4z4nhgm` |
+| Transaction | `15061f1f6bb2fd892018621bb8523dff7ddef6bf0d672f01b56441eb225aaeee` |
+| Input | 203,854 sat |
+| Payment | 50,000 sat to the policy-approved destination |
+| Change | 153,354 sat back to the Keyring address |
+| Fee | 500 sat over 140 vbytes, within the 5,000 sat cap |
+
+Mempool acceptance is the substantive result, not merely a step toward it.
+Bitcoin nodes fully validate scripts and signatures before admitting a
+transaction to the mempool, so acceptance means the network itself verified the
+BIP143 sighash this contract constructed and the signature the MPC network
+produced, against the real UTXO. A wrong sighash, a misreported input amount, a
+malformed witness or a high-S signature would each have been rejected there.
+
+The chain's own record confirms the outputs are exactly what policy approved:
+the payment to the allowlisted destination and change back to the Keyring's own
+derived address, with no third output.

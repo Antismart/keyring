@@ -84,7 +84,7 @@ credentials and no network.
 | B — policy correctness | **Met.** 72 Rust tests: every rule at both sides of its boundary, access control, aggregate budget, MPC success and failure paths. Partial signing does not apply to the single-payload secp256k1 flow. |
 | C — real NEAR signing | **Met.** Deployed to testnet, real signature from the live signer, callback lifecycle tested, signature independently verified, no direct agent-to-MPC path. |
 | D — Base Sepolia e2e | **Met.** EIP-1559 built in-contract and matched against viem, signed by the live MPC network, included in block 56892318. Destination, per-request and fee-cap refusals all returned before signing. |
-| E — Bitcoin e2e | **Mostly met.** BIP143 sighash matched against bitcoinjs-lib, signed by the live MPC network and verified independently. **Outstanding:** the derived address holds no testnet4 BTC, so nothing is broadcast. |
+| E — Bitcoin e2e | **Met.** BIP143 sighash matched against bitcoinjs-lib, signed by the live MPC network, and a spend accepted by the testnet4 network with outputs and fee cap enforced. |
 | ERC-20 | **Met in construction.** Calldata composed in-contract, matched against viem, signed on testnet. Not broadcast: no test tokens held. |
 | Owner-wide budgets | **Met.** Enforced on testnet; refused a request the agent's own cap allowed. |
 | F — agent workflow | **Met.** MCP server implemented over stdio and driven against the deployed contract; `evals/transcript.md` records a real payment, three refusals, owner revocation and the audit trail. |
@@ -151,7 +151,8 @@ Regenerate the demo transcript with `node scripts/demo-agent.mjs` (see
 | Keyring contract | `keyring-gated-1794298589.testnet` |
 | Derived address | `0xbd0748719c9defaff838e0a810a00b0eb563cc53` |
 | Chain id | 84532 (confirmed via `eth_chainId`) |
-| Bitcoin address | `tb1qthnksfdpen20ka34h9dhapdgttwxcdr4z4nhgm` (unfunded) |
+| Bitcoin address | `tb1qthnksfdpen20ka34h9dhapdgttwxcdr4z4nhgm` |
+| Verified Bitcoin spend | [`15061f1f6bb2fd892018621bb8523dff7ddef6bf0d672f01b56441eb225aaeee`](https://mempool.space/testnet4/tx/15061f1f6bb2fd892018621bb8523dff7ddef6bf0d672f01b56441eb225aaeee) |
 | Verified payment | [`0x03f49320c7aa0dcd2126f2a1ab247e0025b1aef8fa23955ab6bfc4d9bce43014`](https://sepolia.basescan.org/tx/0x03f49320c7aa0dcd2126f2a1ab247e0025b1aef8fa23955ab6bfc4d9bce43014) |
 
 ```bash
@@ -203,3 +204,18 @@ node -e "import('./packages/sdk/dist/index.js').then(async m => {
 Register the compressed key with `set_agent_btc_pubkey`, then fund the address.
 A spend is refused outright while no key is registered, rather than sending
 change anywhere unverified.
+
+## Broadcasting a Bitcoin spend
+
+```bash
+node scripts/broadcast-btc.mjs <keyring-account> <request-id>
+```
+
+The script refuses to send unless the registered Bitcoin key matches the one
+the signer derives, the recomputed sighash matches the contract's record, the
+signature verifies, and the outputs are exactly the approved payment plus
+change to the Keyring address. It normalises the signature to low-S, which
+Bitcoin requires and the MPC network does not guarantee.
+
+A testnet4 API that is reachable is needed; `mempool.space` was unavailable
+from the development machine, so the default is `blockstream.info/testnet4`.

@@ -32,7 +32,7 @@ This is early, honest-about-itself infrastructure. What exists today:
 | ✅ **ERC-20 transfers** | Calldata composed in-contract, matches **viem** exactly; signed on testnet |
 | ✅ **Bitcoin testnet4** | BIP143 sighash matches **bitcoinjs-lib**; signed on testnet and verified |
 | ✅ **Owner-wide budgets** | A keyring-wide cap across all agents, enforced on testnet |
-| ⚠️ **Bitcoin broadcast** | The derived address holds no testnet4 BTC, so no Bitcoin transaction has been broadcast. |
+| ✅ **Bitcoin spend on testnet4** | [Broadcast and accepted](https://mempool.space/testnet4/tx/15061f1f6bb2fd892018621bb8523dff7ddef6bf0d672f01b56441eb225aaeee) — 50,000 sat paid, change returned, 500 sat fee |
 
 **Nothing here has been audited, and nothing has touched mainnet or real
 value.** 119 tests pass, and the end-to-end path is real: an agent requested a
@@ -249,7 +249,7 @@ it to be manipulated into calling.
 |---|---|
 | Base Sepolia — native ETH | Built, verified against viem, **payment landed on chain** |
 | Base Sepolia — ERC-20 | Built, verified against viem, signed on testnet |
-| Bitcoin testnet4 — P2WPKH | Built, verified against bitcoinjs-lib, signed on testnet |
+| Bitcoin testnet4 — P2WPKH | Built, verified against bitcoinjs-lib, **spend accepted by the network** |
 
 Bitcoin is one input, native segwit, one payment plus change to the Keyring's
 own address. Multiple inputs are not supported rather than half-supported.
@@ -257,8 +257,12 @@ Bech32m (Taproot) addresses are refused, since Keyring cannot construct those
 spends.
 
 The Bitcoin address for the reference deployment is
-`tb1qthnksfdpen20ka34h9dhapdgttwxcdr4z4nhgm`. Funding it is all that
-stands between the verified signature and a broadcast spend.
+`tb1qthnksfdpen20ka34h9dhapdgttwxcdr4z4nhgm`.
+
+Mempool acceptance is worth stating precisely: Bitcoin nodes validate scripts
+and signatures in full before admitting a transaction, so the network verified
+the sighash this contract built and the signature the MPC network produced
+against the real UTXO.
 
 ## Known limitations
 
@@ -270,23 +274,24 @@ Read `docs/threat-model.md` for the full list. The ones that matter most:
    the owner sets a keyring-wide cap, N agents each capped at C still expose
    the owner to N x C — a policy reading "2 ETH per 24h" limits that *agent*.
    `set_aggregate_budget` bounds the total; nothing sets it by default.
-3. **No Bitcoin or ERC-20 transaction has been broadcast.** Both are
-   constructed, signed by the real MPC network and verified against independent
-   references, but the derived addresses hold no testnet4 BTC and no test
-   tokens. The fee-cap concern that originally blocked Bitcoin is resolved:
-   BIP143 commits the input amount, so a relayer that misreports it produces an
-   unusable signature (`security-decisions.md` §23).
-4. **Replay protection is bounded** at 32 idempotency keys per agent. The uncaught
+3. **No ERC-20 transfer has been broadcast.** The transaction is constructed,
+   signed and verified against viem, but the derived address holds no test
+   tokens, so none has been sent. Native ETH and Bitcoin spends have both
+   landed on their networks.
+4. **Bitcoin is one input, native segwit only.** Multiple inputs are not
+   supported rather than half-supported, and bech32m (Taproot) destinations are
+   refused.
+5. **Replay protection is bounded** at 32 idempotency keys per agent. The uncaught
    case is a second within-policy payment, never an over-limit one.
-5. **A failed broadcast still consumes budget** until the window rolls. Deliberate:
+6. **A failed broadcast still consumes budget** until the window rolls. Deliberate:
    refunding on a relayer's report would let a hostile relayer mint spend capacity.
-6. **Transaction-construction invariants are not yet proven by tests** — only by
-   the absence of dangerous parameters. Gate D/E must close this.
-7. **A failed signing keeps its budget reservation.** The contract cannot prove
+7. **Transaction construction is proven by tests** against viem and
+   bitcoinjs-lib, rather than resting on the absence of a dangerous parameter.
+8. **A failed signing keeps its budget reservation.** The contract cannot prove
    the MPC network never assembled a signature, so releasing budget could
    authorise the same spend twice. A failed signing therefore consumes budget
    until the window rolls.
-8. **The MPC wire types are mirrored, not imported.** The official
+9. **The MPC wire types are mirrored, not imported.** The official
    `near-mpc-sdk` 0.0.1 does not compile against near-sdk 5.30.1. The schemas
    were read from the deployed signer's own ABI and are pinned by tests, but
    must be re-checked when the signer is upgraded.
