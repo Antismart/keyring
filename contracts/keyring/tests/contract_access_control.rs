@@ -58,7 +58,7 @@ fn transfer(
         Chain::BaseSepolia,
         DEST_A.to_string(),
         U128(amount),
-        U128(1_000),
+        evm_params(),
         key.to_string(),
     ) {
         PromiseOrValue::Value(outcome) => outcome,
@@ -415,7 +415,7 @@ fn simulate_transfer_does_not_consume_budget() {
             Chain::BaseSepolia,
             DEST_A.to_string(),
             U128(ONE_ETH),
-            U128(1_000),
+            evm_params(),
         );
         assert!(sim.allowed);
         assert_eq!(sim.would_reserve, Some(U128(ONE_ETH)));
@@ -436,7 +436,7 @@ fn simulate_transfer_reports_the_refusal_a_real_request_would_get() {
         Chain::BaseSepolia,
         DEST_EVIL.to_string(),
         U128(1),
-        U128(1),
+        evm_params(),
     );
     assert!(!sim.allowed);
     assert_eq!(
@@ -454,7 +454,7 @@ fn simulate_reports_unregistered_agents_without_panicking() {
         Chain::BaseSepolia,
         DEST_A.to_string(),
         U128(1),
-        U128(1),
+        evm_params(),
     );
     assert!(!sim.allowed);
     assert_eq!(sim.refusal.unwrap().code, RefusalCode::AgentNotRegistered);

@@ -4,9 +4,10 @@
 //! it, so unused-item warnings here are expected rather than meaningful.
 #![allow(dead_code)]
 
+use keyring_contract::evm::EvmParams;
 use keyring_contract::policy::{ChainPolicy, Policy, TimeWindow};
-use keyring_contract::types::Chain;
-use near_sdk::json_types::U128;
+use keyring_contract::types::{Chain, ChainParams};
+use near_sdk::json_types::{U128, U64};
 use near_sdk::{AccountId, PublicKey};
 
 /// A distinct, structurally valid ed25519 public key per seed.
@@ -60,4 +61,27 @@ pub fn at_utc(hour: u64, minute: u64) -> u64 {
     // Day 20000 since epoch keeps the value realistic and well clear of zero.
     const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
     20_000 * DAY_MS + hour * 3_600_000 + minute * 60_000
+}
+
+/// Realistic Base Sepolia gas parameters.
+///
+/// 21000 gas at 1 gwei gives a 21000 gwei (2.1e13 wei) fee ceiling, comfortably
+/// under the 0.01 ETH fee cap in [`evm_policy`].
+pub fn evm_params() -> ChainParams {
+    ChainParams::Evm(EvmParams {
+        nonce: U64(0),
+        gas_limit: U64(21_000),
+        max_fee_per_gas: U128(1_000_000_000),
+        max_priority_fee_per_gas: U128(1_000_000),
+    })
+}
+
+/// Gas parameters with an explicit fee ceiling, for fee-cap tests.
+pub fn evm_params_with_fee(gas_limit: u64, max_fee_per_gas: u128) -> ChainParams {
+    ChainParams::Evm(EvmParams {
+        nonce: U64(0),
+        gas_limit: U64(gas_limit),
+        max_fee_per_gas: U128(max_fee_per_gas),
+        max_priority_fee_per_gas: U128(0),
+    })
 }

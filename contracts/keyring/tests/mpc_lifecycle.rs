@@ -9,14 +9,16 @@
 mod common;
 use common::*;
 
+use keyring_contract::evm::{address_bytes, Eip1559Transfer, BASE_SEPOLIA_CHAIN_ID};
 use keyring_contract::mpc;
-use keyring_contract::signer::{self, SignerBackend};
+use keyring_contract::policy::RefusalCode;
+use keyring_contract::signer::SignerBackend;
 use keyring_contract::state::RequestStatus;
 use keyring_contract::types::Chain;
 use keyring_contract::{Contract, RequestOutcome};
 use near_sdk::json_types::U128;
 use near_sdk::test_utils::VMContextBuilder;
-use near_sdk::{serde_json, testing_env, AccountId, PromiseError, PromiseOrValue, PublicKey};
+use near_sdk::{serde_json, testing_env, PromiseError, PromiseOrValue, PublicKey};
 
 const OWNER: &str = "owner.testnet";
 const CONTRACT: &str = "keyring.testnet";
@@ -46,7 +48,7 @@ fn request(c: &mut Contract, amount: u128, key: &str) -> PromiseOrValue<RequestO
         Chain::BaseSepolia,
         DEST_A.to_string(),
         U128(amount),
-        U128(1_000),
+        evm_params(),
         key.to_string(),
     )
 }
@@ -130,56 +132,82 @@ fn the_sign_deposit_is_one_yoctonear_and_gas_clears_the_minimum() {
 // ----------------------------------------------------------------- payload
 
 #[test]
-fn the_signed_payload_is_derived_from_the_approved_fields() {
-    let contract: AccountId = account(CONTRACT);
-    let base = signer::gate_c_commitment(&contract, 1, "base-sepolia", DEST_A, 100, 10);
-
-    // Changing any policy-relevant field must change what gets signed.
-    assert_ne!(
-        base,
-        signer::gate_c_commitment(&contract, 2, "base-sepolia", DEST_A, 100, 10)
-    );
-    assert_ne!(
-        base,
-        signer::gate_c_commitment(&contract, 1, "base-sepolia", DEST_B, 100, 10)
-    );
-    assert_ne!(
-        base,
-        signer::gate_c_commitment(&contract, 1, "base-sepolia", DEST_A, 101, 10)
-    );
-    assert_ne!(
-        base,
-        signer::gate_c_commitment(&contract, 1, "base-sepolia", DEST_A, 100, 11)
-    );
-    assert_ne!(
-        base,
-        signer::gate_c_commitment(&contract, 1, "bitcoin-testnet4", DEST_A, 100, 10)
-    );
-
-    // Deterministic for identical inputs.
-    assert_eq!(
-        base,
-        signer::gate_c_commitment(&contract, 1, "base-sepolia", DEST_A, 100, 10)
-    );
-}
-
-#[test]
-fn the_request_records_exactly_what_was_sent_for_signing() {
+fn the_signed_payload_is_the_real_transaction_hash() {
+    // The payload is now an EIP-1559 signing hash, recomputed here from the
+    // approved fields. Anyone can repeat this from the stored request and
+    // confirm the contract signed the transaction policy authorised.
     let mut c = setup(SignerBackend::Mock);
     let _ = request(&mut c, ONE_ETH, "k1");
     let req = c.get_request(1).expect("request recorded");
 
-    let expected = mpc::to_hex(&signer::gate_c_commitment(
-        &account(CONTRACT),
-        1,
-        "base-sepolia",
-        DEST_A,
-        ONE_ETH,
-        1_000,
-    ));
-    // An auditor can recompute the payload from the approved fields and confirm
-    // it matches what the contract signed (invariant 6).
-    assert_eq!(req.payload_hex, Some(expected));
+    let expected = Eip1559Transfer {
+        chain_id: BASE_SEPOLIA_CHAIN_ID,
+        nonce: 0,
+        max_priority_fee_per_gas: 1_000_000,
+        max_fee_per_gas: 1_000_000_000,
+        gas_limit: 21_000,
+        to: address_bytes(DEST_A).expect("valid destination"),
+        value: ONE_ETH,
+    }
+    .signing_hash();
+
+    assert_eq!(req.payload_hex, Some(mpc::to_hex(&expected)));
+}
+
+#[test]
+fn the_fee_is_derived_from_gas_and_not_supplied_by_the_caller() {
+    // There is no fee parameter any more. The recorded fee must equal
+    // gas_limit * max_fee_per_gas, so the value policy checked and the value
+    // the transaction can spend are the same number (invariant 9).
+    let mut c = setup(SignerBackend::Mock);
+    let _ = request(&mut c, ONE_ETH, "k1");
+    let req = c.get_request(1).unwrap();
+    assert_eq!(req.fee, U128(21_000u128 * 1_000_000_000u128));
+}
+
+#[test]
+fn inflated_gas_parameters_are_caught_by_the_fee_cap() {
+    // A caller cannot buy a huge fee allowance by inflating gas numbers: the
+    // derived fee is checked against the policy fee cap like any other.
+    let mut c = setup(SignerBackend::Mock);
+    ctx_from("agent-host.testnet", pk(1), at_utc(12, 0));
+    let out = c.request_transfer(
+        Chain::BaseSepolia,
+        DEST_A.to_string(),
+        U128(1),
+        // 200000 gas at 1000 gwei = 2e17 wei, far above the 1e16 fee cap.
+        evm_params_with_fee(200_000, 1_000_000_000_000),
+        "inflated".to_string(),
+    );
+    match out {
+        PromiseOrValue::Value(RequestOutcome::Refused { refusal, .. }) => {
+            assert_eq!(refusal.code, RefusalCode::FeeCapExceeded);
+            assert_eq!(
+                refusal.observed,
+                Some(U128(200_000u128 * 1_000_000_000_000u128))
+            );
+        }
+        _ => panic!("an over-cap fee must be refused"),
+    }
+}
+
+#[test]
+fn parameters_for_the_wrong_chain_are_rejected() {
+    let mut c = setup(SignerBackend::Mock);
+    ctx_from("agent-host.testnet", pk(1), at_utc(12, 0));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        c.request_transfer(
+            Chain::BitcoinTestnet4,
+            "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".to_string(),
+            U128(1),
+            evm_params(),
+            "wrong-chain".to_string(),
+        )
+    }));
+    assert!(
+        result.is_err(),
+        "EVM parameters must not be accepted for Bitcoin"
+    );
 }
 
 // --------------------------------------------------------------- mock path
