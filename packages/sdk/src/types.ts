@@ -103,7 +103,15 @@ export interface StoredSignature {
   mock: boolean;
 }
 
-/** Lifecycle state of a transfer request. */
+/**
+ * Lifecycle state of a transfer request.
+ *
+ * `refused`, `signed` and `failed` are terminal.
+ *
+ * `created` is transient: the contract writes it and then moves the request on
+ * within the same call, so a request read back from the chain is never
+ * `created`. Handle it defensively, but do not build a flow that waits for it.
+ */
 export type RequestStatus = "created" | "refused" | "signing" | "signed" | "failed";
 
 /** One recorded reservation against the rolling budget. */
@@ -179,6 +187,13 @@ export interface TransferRequest {
  * success would misreport a refused payment as a completed one.
  */
 export type RequestOutcome =
+  /**
+   * Passed policy, signing not yet attempted.
+   *
+   * Not currently returned: both signer backends attempt signing within the
+   * same call, so a permitted request resolves to `signed` or `signing_failed`.
+   * Reserved for a future deferred-signing mode.
+   */
   | { outcome: "created"; request_id: number; reserved: BaseUnits }
   | { outcome: "refused"; request_id: number; refusal: Refusal }
   | { outcome: "duplicate"; request_id: number }
@@ -200,9 +215,10 @@ export type SignerBackend = { mpc: { contract_id: AccountId } } | "mock";
 /**
  * Whether an outcome means the request passed policy.
  *
- * Both `created` and `signed` indicate the policy allowed it: `signed` comes
- * back when signing completed within the same call, `created` when it has not
- * been attempted yet. Neither means the payment reached its destination chain.
+ * Both `created` and `signed` indicate the policy allowed it, though only
+ * `signed` occurs today. Neither means the payment reached a destination
+ * chain: the contract does not yet construct foreign-chain transactions, and
+ * even once it does, a signature is not a broadcast.
  */
 export function isPermitted(o: RequestOutcome): boolean {
   return o.outcome === "created" || o.outcome === "signed";
@@ -215,7 +231,11 @@ export function isSigned(
   return o.outcome === "signed";
 }
 
-/** Narrows a {@link RequestOutcome} to the created case. */
+/**
+ * Narrows a {@link RequestOutcome} to the created case.
+ *
+ * See {@link RequestOutcome} — this case does not currently occur.
+ */
 export function isCreated(
   o: RequestOutcome,
 ): o is { outcome: "created"; request_id: number; reserved: BaseUnits } {

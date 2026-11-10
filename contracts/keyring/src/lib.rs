@@ -21,13 +21,27 @@
 //! contract from those fields at Gate D/E, so there is no field in which a
 //! caller can smuggle a second recipient or a different amount (invariants 5–8).
 //!
-//! ## Gate status
+//! ## Implementation status
 //!
-//! This is Gate A (CLAUDE.md §12): state, interfaces, the policy engine and a
-//! mock signer. `request_transfer` evaluates policy, reserves budget and records
-//! the request, then stops at `Created`. It does **not** sign: no MPC call, no
-//! transaction construction. `Signing`/`Signed`/`Failed` are declared but
-//! unreachable until Gate C verifies the real signer interface.
+//! **Signing is implemented and verified on NEAR testnet (Gate C, CLAUDE.md
+//! §12).** `request_transfer` evaluates policy, reserves budget, and then signs
+//! through the configured backend: [`SignerBackend::Mpc`] calls the NEAR Chain
+//! Signatures signer and resolves through the private [`Contract::on_signed`]
+//! callback to `Signed` or `Failed`. The full lifecycle
+//! `Created -> Signing -> Signed | Failed` is reachable and tested. The wire
+//! types in [`mpc`] were read from the deployed signer's own embedded ABI
+//! rather than written from memory.
+//!
+//! **Foreign-chain transaction construction is not implemented** — that is
+//! Gate D (EVM) and Gate E (Bitcoin). The 32 bytes sent to the signer are a
+//! domain-separated *commitment* to the policy-approved fields, not a
+//! broadcastable transaction; see [`signer::gate_c_commitment`]. Keyring can
+//! therefore obtain a valid signature, but cannot yet make a payment on any
+//! chain.
+//!
+//! Because the transaction is not built yet, invariants 5–8 currently rest on
+//! the *absence* of any dangerous parameter in this method surface, not on a
+//! construction test. Gate D/E must close that gap.
 
 pub mod events;
 pub mod mpc;
@@ -60,7 +74,14 @@ use types::{normalize_destination, Chain, MAX_IDEMPOTENCY_KEY_LEN, MAX_LABEL_LEN
 #[derive(Clone, Debug)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum RequestOutcome {
-    /// Passed policy. Budget is reserved and the request is recorded.
+    /// Passed policy, budget reserved, signing not yet attempted.
+    ///
+    /// **Not currently returned by any code path.** Both backends attempt
+    /// signing within `request_transfer`, so a permitted request resolves to
+    /// [`RequestOutcome::Signed`] or [`RequestOutcome::SigningFailed`]. This
+    /// variant is retained for a future deferred-signing mode, in which a
+    /// request could be authorised now and signed later. Treat it as reserved:
+    /// a caller should handle it, but will not see it today.
     Created { request_id: u64, reserved: U128 },
     /// Denied by policy. No budget was reserved.
     Refused { request_id: u64, refusal: Refusal },
@@ -242,8 +263,22 @@ impl Contract {
     ///
     /// Returns a [`RequestOutcome`]; a policy refusal is a normal return value.
     ///
-    /// **Gate A scope:** on success this reserves budget and records the request
-    /// as `Created`. Signing is not performed.
+    /// On success the budget is reserved *before* any asynchronous work begins,
+    /// and the configured backend then signs:
+    ///
+    /// - [`SignerBackend::Mock`] signs synchronously and returns
+    ///   [`RequestOutcome::Signed`] as a value.
+    /// - [`SignerBackend::Mpc`] returns a `Promise`: the NEAR Chain Signatures
+    ///   signer is called and [`Self::on_signed`] resolves the request to
+    ///   `Signed` or `SigningFailed`.
+    ///
+    /// What gets signed is a commitment to the approved fields, not yet a
+    /// foreign-chain transaction — see [`signer::gate_c_commitment`].
+    ///
+    /// Callers should attach roughly 300 TGas: 100 is forwarded to the signer
+    /// and 20 reserved for the callback. The signer's 1 yoctoNEAR deposit is
+    /// attached by this contract from its own balance, so this method is not
+    /// `#[payable]` and an agent cannot influence it.
     pub fn request_transfer(
         &mut self,
         chain: Chain,

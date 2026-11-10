@@ -1,17 +1,19 @@
-//! Signing backend abstraction and the deterministic mock signer.
+//! Backend selection, key derivation paths, the signed payload, and the mock.
 //!
-//! # What this module is not
+//! # Scope of this module
 //!
-//! It is **not** an implementation of the NEAR Chain Signatures interface. The
-//! real MPC signer is a cross-contract call whose exact method signature,
-//! argument shape and response format are verified against the deployed testnet
-//! signer contract at Gate C (CLAUDE.md §12) rather than written from memory
-//! here, which CLAUDE.md §2 forbids.
+//! The MPC *wire format* is not here — it lives in [`crate::mpc`], whose types
+//! were read from the deployed signer's embedded ABI rather than written from
+//! memory (CLAUDE.md §2). The cross-contract call itself is issued from
+//! `lib.rs`.
 //!
-//! What this module provides now is the *seam*: a backend selector carried in
-//! contract config, plus a deterministic mock that lets the policy engine and
-//! the request lifecycle be tested end to end without a network. Mock results
-//! must never be presented as evidence of MPC integration (CLAUDE.md §10).
+//! This module holds what surrounds that call: which backend a deployment uses,
+//! the derivation path the contract computes for each agent and chain, the
+//! payload that is signed, and a deterministic mock for local use.
+//!
+//! Mock results must never be presented as evidence of MPC integration
+//! (CLAUDE.md §10). `StoredSignature.mock` records the distinction on every
+//! request, so it survives into anything that reads the record.
 
 use near_sdk::{near, AccountId};
 
@@ -20,9 +22,17 @@ use near_sdk::{near, AccountId};
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum SignerBackend {
-    /// Real NEAR Chain Signatures MPC contract. Wired at Gate C.
+    /// Real NEAR Chain Signatures MPC contract.
+    ///
+    /// Implemented and verified against `v1.signer-prod.testnet`: the contract
+    /// calls `sign`, and [`crate::Contract::on_signed`] handles the response.
     Mpc { contract_id: AccountId },
-    /// Deterministic local stand-in. Test and local-demo use only.
+    /// Deterministic local stand-in.
+    ///
+    /// Used by the unit tests and by local demos. It completes the lifecycle
+    /// synchronously and flags every signature it produces as `mock`. It
+    /// produces no valid signature and must never back a deployment that
+    /// anyone relies on.
     Mock,
 }
 
@@ -45,11 +55,15 @@ pub fn derivation_path(owner: &AccountId, agent_label: &str, chain: &str) -> Str
     format!("keyring-v1,{owner},{agent_label},{chain}")
 }
 
-/// A deterministic 64-byte pseudo-signature for tests.
+/// A deterministic 64-byte pseudo-signature.
 ///
-/// Derived from the payload and path by hashing, so tests can assert that the
-/// value the contract would sign is exactly the value policy approved. It is not
-/// a valid signature on any curve and will not verify anywhere.
+/// Used by [`SignerBackend::Mock`], so it is reached by the contract's own code
+/// path and not only by tests. Derived from the payload and path by hashing, so
+/// a test can assert that the value the contract would sign is exactly the
+/// value policy approved.
+///
+/// It is **not** a valid signature on any curve and will not verify anywhere.
+/// Every signature it produces is stored with `mock: true`.
 pub fn mock_signature(payload: &[u8], path: &str) -> [u8; 64] {
     let mut out = [0u8; 64];
     let a = near_sdk::env::sha256(&[payload, path.as_bytes()].concat()[..]);

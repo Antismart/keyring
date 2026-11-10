@@ -176,14 +176,21 @@ impl Keyring {
 /// Created -> Signing -> Failed
 /// ```
 ///
-/// `Signing`, `Signed` and `Failed` are declared now so that the lifecycle is
-/// part of the committed interface, but only `Created` and `Refused` are
-/// reachable until Gate C wires the real MPC signer.
+/// Every state is reachable and covered by tests. `Refused`, `Signed` and
+/// `Failed` are terminal.
+///
+/// `Created` is **transient**: `request_transfer` writes it, then moves the
+/// request to `Signing` (MPC backend) or straight to `Signed` (mock backend)
+/// within the same call. No externally observable committed state is ever
+/// `Created`, so a reader polling this contract will not see it.
 #[near(serializers = [json, borsh])]
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestStatus {
-    /// Passed policy; budget reserved; not yet sent to the signer.
+    /// Passed policy and budget reserved, but not yet handed to the signer.
+    ///
+    /// Transient — always overwritten later in the same call. See the note on
+    /// this enum.
     Created,
     /// Denied by policy. Terminal. No budget was reserved.
     Refused,
