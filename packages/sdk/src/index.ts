@@ -10,3 +10,4 @@
 export * from "./types.js";
 export * from "./client.js";
 export * from "./evm.js";
+export * from "./near.js";

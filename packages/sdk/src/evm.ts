@@ -14,6 +14,8 @@
  * assembled bytes carry the recipient and value the contract approved.
  */
 
+import { keccak_256 } from "@noble/hashes/sha3";
+import { base58 } from "@scure/base";
 import {
   keccak256,
   parseTransaction,
@@ -196,4 +198,24 @@ export async function waitForReceipt(
     await new Promise((r) => setTimeout(r, 2000));
   }
   throw new Error(`no receipt for ${txHash} within ${timeoutMs}ms`);
+}
+
+/**
+ * The EVM address for a NEAR-format secp256k1 public key.
+ *
+ * NEAR encodes such a key as 64 raw bytes (`x || y`). An Ethereum address is
+ * the last 20 bytes of the keccak-256 hash of exactly those 64 bytes — note
+ * that the SEC1 `0x04` uncompressed prefix is *not* hashed.
+ */
+export function evmAddressFromNearKey(nearPublicKey: string): Hex {
+  const parts = nearPublicKey.split(":");
+  if (parts.length !== 2 || parts[0] !== "secp256k1") {
+    throw new Error(`expected a secp256k1 NEAR key, got ${nearPublicKey}`);
+  }
+  const raw = base58.decode(parts[1]!);
+  if (raw.length !== 64) {
+    throw new Error(`expected a 64-byte key, got ${raw.length} bytes`);
+  }
+  const hash = keccak_256(raw);
+  return `0x${Buffer.from(hash.slice(12)).toString("hex")}` as Hex;
 }
