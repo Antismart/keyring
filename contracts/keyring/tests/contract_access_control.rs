@@ -15,7 +15,7 @@ use keyring_contract::types::Chain;
 use keyring_contract::{Contract, RequestOutcome};
 use near_sdk::json_types::U128;
 use near_sdk::test_utils::VMContextBuilder;
-use near_sdk::{testing_env, PublicKey};
+use near_sdk::{testing_env, PromiseOrValue, PublicKey};
 
 const OWNER: &str = "owner.testnet";
 const STRANGER: &str = "stranger.testnet";
@@ -40,6 +40,12 @@ fn setup() -> Contract {
     c
 }
 
+/// Performs a transfer request and unwraps the immediate result.
+///
+/// The test contract is configured with the mock backend, which resolves
+/// synchronously, so every outcome arrives as a value. A `Promise` here would
+/// mean the backend was misconfigured for a unit test, hence the explicit
+/// panic rather than a silent skip.
 fn transfer(
     c: &mut Contract,
     signer_pk: PublicKey,
@@ -48,19 +54,29 @@ fn transfer(
     now_ms: u64,
 ) -> RequestOutcome {
     ctx(STRANGER, signer_pk, now_ms);
-    c.request_transfer(
+    match c.request_transfer(
         Chain::BaseSepolia,
         DEST_A.to_string(),
         U128(amount),
         U128(1_000),
         key.to_string(),
-    )
+    ) {
+        PromiseOrValue::Value(outcome) => outcome,
+        PromiseOrValue::Promise(_) => panic!("mock backend must resolve synchronously"),
+    }
 }
 
-fn created_id(o: &RequestOutcome) -> u64 {
+/// Request id from an outcome that passed policy.
+///
+/// The mock backend signs synchronously, so a permitted request returns
+/// `Signed`. `Created` is accepted too, since that is what the MPC backend
+/// returns before its callback runs.
+fn ok_id(o: &RequestOutcome) -> u64 {
     match o {
-        RequestOutcome::Created { request_id, .. } => *request_id,
-        other => panic!("expected Created, got {other:?}"),
+        RequestOutcome::Signed { request_id } | RequestOutcome::Created { request_id, .. } => {
+            *request_id
+        }
+        other => panic!("expected a permitted request, got {other:?}"),
     }
 }
 
@@ -159,9 +175,10 @@ fn an_unregistered_key_cannot_request_a_transfer() {
 fn a_registered_agent_key_can_request_a_transfer() {
     let mut c = setup();
     let out = transfer(&mut c, pk(1), ONE_ETH / 2, "k1", at_utc(12, 0));
-    let id = created_id(&out);
+    let id = ok_id(&out);
     let req = c.get_request(id).expect("request should be recorded");
-    assert_eq!(req.status, RequestStatus::Created);
+    // The mock backend completes the lifecycle synchronously.
+    assert_eq!(req.status, RequestStatus::Signed);
     assert_eq!(req.reserved, U128(ONE_ETH / 2));
     assert_eq!(req.destination, DEST_A);
     // The agent's own key is recorded, not the calling account.
@@ -203,7 +220,7 @@ fn re_enabling_an_agent_restores_its_ability_to_transact() {
 
     ctx(OWNER, pk(0), at_utc(12, 0));
     c.set_agent_enabled(pk(1), true);
-    created_id(&transfer(&mut c, pk(1), 1, "k2", at_utc(12, 0)));
+    ok_id(&transfer(&mut c, pk(1), 1, "k2", at_utc(12, 0)));
 }
 
 // ------------------------------------------------------- idempotency (inv. 14)
@@ -211,7 +228,7 @@ fn re_enabling_an_agent_restores_its_ability_to_transact() {
 #[test]
 fn a_repeated_idempotency_key_does_not_create_a_second_request() {
     let mut c = setup();
-    let first = created_id(&transfer(
+    let first = ok_id(&transfer(
         &mut c,
         pk(1),
         ONE_ETH / 2,
@@ -253,8 +270,8 @@ fn an_empty_idempotency_key_is_rejected() {
 fn successive_requests_cannot_exceed_the_rolling_cap_in_aggregate() {
     let mut c = setup();
     // Cap is 2 ETH per 24h, 1 ETH per request.
-    created_id(&transfer(&mut c, pk(1), ONE_ETH, "a", at_utc(12, 0)));
-    created_id(&transfer(&mut c, pk(1), ONE_ETH, "b", at_utc(12, 1)));
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "a", at_utc(12, 0)));
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "b", at_utc(12, 1)));
 
     // The third request sees both reservations and must be refused.
     let third = transfer(&mut c, pk(1), 1, "c", at_utc(12, 2));
@@ -276,21 +293,31 @@ fn successive_requests_cannot_exceed_the_rolling_cap_in_aggregate() {
 
 #[test]
 fn budget_is_reserved_at_authorisation_not_after_signing() {
-    // Gate A does not sign at all, so the request stays Created. The budget must
-    // already be committed at that point: a signature that is produced but never
-    // broadcast must not be refundable (invariant 13).
+    // The reservation must be stamped at the moment of authorisation, not when
+    // a signature comes back: a signature produced but never broadcast must not
+    // be refundable (invariant 13).
     let mut c = setup();
-    created_id(&transfer(&mut c, pk(1), ONE_ETH, "a", at_utc(12, 0)));
+    let now = at_utc(12, 0);
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "a", now));
+
     let req = c.get_request(1).unwrap();
-    assert_eq!(req.status, RequestStatus::Created);
     assert_eq!(req.reserved, U128(ONE_ETH));
+
+    let agent = c.get_agent(account(OWNER), pk(1)).unwrap();
+    let entry = &agent.ledgers[0].entries[0];
+    assert_eq!(entry.amount, U128(ONE_ETH));
+    assert_eq!(
+        entry.at_ms, now,
+        "reservation is stamped at authorisation time"
+    );
+    assert_eq!(entry.request_id, 1);
 }
 
 #[test]
 fn spend_ages_out_of_the_rolling_window() {
     let mut c = setup();
-    created_id(&transfer(&mut c, pk(1), ONE_ETH, "a", at_utc(12, 0)));
-    created_id(&transfer(&mut c, pk(1), ONE_ETH, "b", at_utc(12, 1)));
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "a", at_utc(12, 0)));
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "b", at_utc(12, 1)));
     assert_eq!(
         refusal(&transfer(&mut c, pk(1), 1, "c", at_utc(12, 2))),
         RefusalCode::DailyCapExceeded
@@ -298,7 +325,7 @@ fn spend_ages_out_of_the_rolling_window() {
 
     // 25 hours later the earlier spends have expired.
     let next_day = at_utc(12, 0) + 25 * 3_600_000;
-    created_id(&transfer(&mut c, pk(1), ONE_ETH, "d", next_day));
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "d", next_day));
 }
 
 // ------------------------------------------------------- views do not mutate
