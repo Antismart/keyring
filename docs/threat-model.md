@@ -78,10 +78,12 @@ an allowlisted destination before the owner notices. Keyring reduces blast
 radius; it does not eliminate it. Allowlisting only addresses the owner controls
 or genuinely intends to pay is what makes this bound meaningful.
 
-**The bound is per agent, not per owner.** Budgets live on the agent and are
-keyed by chain; there is no owner-wide aggregate cap. An owner running N agents
-each capped at C per 24 hours is exposed to N x C on that chain, and compromise
-of several agent keys at once scales accordingly. See security decision 19.
+**The bound is per agent unless the owner sets a keyring-wide cap.** Budgets
+live on the agent and are keyed by chain and asset. An owner who sets no
+owner-wide cap and runs N agents each capped at C is exposed to N x C, and
+compromise of several agent keys at once scales accordingly. An owner-wide
+budget bounds the total across every agent; it is opt-in. See decision 26,
+which supersedes decision 19.
 
 Tests: `successive_requests_cannot_exceed_the_rolling_cap_in_aggregate`,
 `a_disabled_agent_cannot_obtain_a_new_request`.
@@ -140,7 +142,15 @@ and that the encoding ends with empty calldata and an empty access list. There
 is no `data` field on the transaction struct, so calldata cannot be attached at
 all.
 
-Bitcoin remains unproven (Gate E).
+Bitcoin construction is now proven the same way, against bitcoinjs-lib
+fixtures: the sighash matches, outputs are limited to the approved payment plus
+change to the contract's own derived address, and bech32 decoding rejects what
+bitcoinjs rejects. Invariant 8 is covered by construction tests; what remains
+unproven is only broadcast.
+
+Invariant 7 is no longer vacuous: ERC-20 calldata is composed by the contract
+from a validated token, recipient and amount, and there is no variant of the
+call type that carries caller-supplied bytes (decision 27).
 
 Invariants 5 and 6 are now enforced by construction tests for EVM, not only by
 the absence of a dangerous parameter. Invariant 7 is vacuous because ERC-20
@@ -191,10 +201,19 @@ chain policies (4), spend entries (64), idempotency records (32), history ids
 history id deletes the corresponding request, so request storage is bounded per
 keyring rather than growing with every request.
 
-### T12 — Bitcoin fee cap is evaded via inflated UTXO values
+### T12 — Bitcoin fee cap is evaded via misreported UTXO values
 
-**Not mitigated. Open.** See security decision 8. Must be resolved or
-prominently documented before any Bitcoin claim is made.
+**Mitigated.** See security decision 23, which supersedes decision 8.
+
+A BIP143 sighash commits the input's amount, so a relayer that misreports a
+UTXO value produces a signature that fails verification against the real UTXO.
+The transaction is rejected by the network rather than paying an oversized fee.
+The number the fee cap is checked against is the number the signature is bound
+to.
+
+**Residual risk:** a hostile relayer can still supply a stale or already-spent
+UTXO, which makes the transaction unbroadcastable. That is an availability
+problem, not a spending one.
 
 ### T13 — The MPC signer is unavailable, slow, or returns a signature nobody sees
 
@@ -224,13 +243,14 @@ compromised *owner*.
 ## Residual risks, stated plainly
 
 1. A compromised agent key can spend the remaining 24-hour budget to an
-   allowlisted destination. The cap bounds one agent, not the whole keyring:
-   total owner exposure is the sum across agents (decision 19).
+   allowlisted destination. Without an owner-wide cap set, total exposure is
+   the sum across agents (decision 26).
 2. Bitcoin fee caps rest on UTXO data the contract cannot verify (decision 8).
 3. Replay protection is bounded at 32 keys per agent (decision 6).
 4. A failed broadcast still consumes budget until the window rolls (decision 4).
 5. Bitcoin construction (invariant 8) is entirely unimplemented, and its
-   fee-cap problem (decision 8) is unresolved.
+   fee-cap problem is resolved (decision 23), but no Bitcoin transaction has
+   been broadcast: the derived address holds no testnet4 BTC.
 6. A failed signing consumes budget until the window rolls (decision 16).
 7. The mirrored MPC wire types must be re-checked whenever the signer contract
    is upgraded (decision 14).

@@ -84,8 +84,9 @@ credentials and no network.
 | B — policy correctness | **Met.** 72 Rust tests: every rule at both sides of its boundary, access control, aggregate budget, MPC success and failure paths. Partial signing does not apply to the single-payload secp256k1 flow. |
 | C — real NEAR signing | **Met.** Deployed to testnet, real signature from the live signer, callback lifecycle tested, signature independently verified, no direct agent-to-MPC path. |
 | D — Base Sepolia e2e | **Met.** EIP-1559 built in-contract and matched against viem, signed by the live MPC network, included in block 56892318. Destination, per-request and fee-cap refusals all returned before signing. |
-| E — Bitcoin e2e | Not started. Blocked on the fee-cap/UTXO issue in `security-decisions.md` section 8. |
-| ERC-20 | Not implemented; the transaction struct has no calldata field (decision 21). |
+| E — Bitcoin e2e | **Mostly met.** BIP143 sighash matched against bitcoinjs-lib, signed by the live MPC network and verified independently. **Outstanding:** the derived address holds no testnet4 BTC, so nothing is broadcast. |
+| ERC-20 | **Met in construction.** Calldata composed in-contract, matched against viem, signed on testnet. Not broadcast: no test tokens held. |
+| Owner-wide budgets | **Met.** Enforced on testnet; refused a request the agent's own cap allowed. |
 | F — agent workflow | **Met.** MCP server implemented over stdio and driven against the deployed contract; `evals/transcript.md` records a real payment, three refusals, owner revocation and the audit trail. |
 
 ## Testnet verification
@@ -150,6 +151,7 @@ Regenerate the demo transcript with `node scripts/demo-agent.mjs` (see
 | Keyring contract | `keyring-gated-1794298589.testnet` |
 | Derived address | `0xbd0748719c9defaff838e0a810a00b0eb563cc53` |
 | Chain id | 84532 (confirmed via `eth_chainId`) |
+| Bitcoin address | `tb1qthnksfdpen20ka34h9dhapdgttwxcdr4z4nhgm` (unfunded) |
 | Verified payment | [`0x03f49320c7aa0dcd2126f2a1ab247e0025b1aef8fa23955ab6bfc4d9bce43014`](https://sepolia.basescan.org/tx/0x03f49320c7aa0dcd2126f2a1ab247e0025b1aef8fa23955ab6bfc4d9bce43014) |
 
 ```bash
@@ -164,3 +166,40 @@ node scripts/broadcast-evm.mjs keyring-gated-1794298589.testnet 1
 The broadcast script refuses to send unless the recomputed signing hash matches
 the contract's record, the assembled transaction still carries the approved
 recipient and value, and the signature recovers to the derived Keyring address.
+
+## Resetting a development deployment
+
+The state layout changes when the policy model changes, which makes old records
+undeserialisable. `migrate_reset` installs fresh state under a new storage
+prefix version:
+
+```bash
+near contract deploy keyring-gated-1794298589.testnet \
+  use-file target/near/keyring_contract/keyring_contract.wasm \
+  with-init-call migrate_reset json-args \
+  '{"signer":{"mpc":{"contract_id":"v1.signer-prod.testnet"}},"prefix_version":2}' \
+  prepaid-gas '100 TGas' attached-deposit '0 NEAR' \
+  network-config testnet sign-with-legacy-keychain send
+```
+
+The prefix version must not have been used on that account before: a fresh
+`IterableMap` over the same prefix still reads what the old layout wrote there.
+Old entries are orphaned, not deleted, so their storage stake stays locked.
+This is a development tool and is unsuitable for a deployment holding real
+policy — see `security-decisions.md` §28.
+
+## Enabling Bitcoin for an agent
+
+```bash
+# Derive the key and address from the MPC signer, then register the key.
+node -e "import('./packages/sdk/dist/index.js').then(async m => {
+  const k = await m.deriveBitcoinKey({
+    path: 'keyring-v1,keyring-gated-1794298589.testnet,agent-one,bitcoin-testnet4',
+    predecessor: 'keyring-gated-1794298589.testnet' });
+  console.log(k.compressedPubkey, k.address);
+})"
+```
+
+Register the compressed key with `set_agent_btc_pubkey`, then fund the address.
+A spend is refused outright while no key is registered, rather than sending
+change anywhere unverified.

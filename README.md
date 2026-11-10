@@ -29,8 +29,10 @@ This is early, honest-about-itself infrastructure. What exists today:
 | ✅ **Refusals before signing** | Destination, per-request cap and fee cap, each with a structured reason |
 | ✅ **MCP server** | 5 tools over stdio, driven against the deployed contract |
 | ✅ **Agent demo** | [`evals/transcript.md`](evals/transcript.md) — payment, refusals, revocation, audit trail |
-| ⬜ **Bitcoin** | Not implemented. |
-| ⬜ **ERC-20 transfers** | Not implemented — the transaction has no calldata field at all. |
+| ✅ **ERC-20 transfers** | Calldata composed in-contract, matches **viem** exactly; signed on testnet |
+| ✅ **Bitcoin testnet4** | BIP143 sighash matches **bitcoinjs-lib**; signed on testnet and verified |
+| ✅ **Owner-wide budgets** | A keyring-wide cap across all agents, enforced on testnet |
+| ⚠️ **Bitcoin broadcast** | The derived address holds no testnet4 BTC, so no Bitcoin transaction has been broadcast. |
 
 **Nothing here has been audited, and nothing has touched mainnet or real
 value.** 119 tests pass, and the end-to-end path is real: an agent requested a
@@ -92,9 +94,16 @@ point):
 - **Enabled / disabled** — the owner's kill switch
 - **Chain allowlist** — the absence of a chain policy is the denial
 - **Destination allowlist** — an empty list permits nobody, never anybody
-- **Per-request cap**
-- **Rolling 24-hour cap** — reserved at authorisation, checked against the
-  projected total
+- **Asset allowlist** — per chain. Permission to move a token is not permission
+  to send native value, or the reverse, and each asset has its own destination
+  allowlist
+- **Per-request cap** — per asset, since amounts are in the asset's own base
+  units
+- **Rolling 24-hour cap** — per asset; reserved at authorisation, checked
+  against the projected total
+- **Owner-wide 24-hour cap** *(optional)* — bounds the total across **every**
+  agent in the keyring, which per-agent caps cannot do: an owner running N
+  agents each capped at C is otherwise exposed to N x C
 - **Time window** — UTC minutes of day, including windows that wrap midnight
 - **Fee cap** — checked against `gas_limit * max_fee_per_gas`, which the
   contract derives. There is no caller-supplied fee field.
@@ -150,12 +159,14 @@ parameter:
 | `set_policy(public_key, policy)` | Replace a policy |
 | `set_agent_enabled(public_key, enabled)` | Kill switch |
 | `revoke_agent(public_key)` | Remove an agent |
+| `set_aggregate_budget(budget)` | Keyring-wide 24h caps across all agents |
+| `set_agent_btc_pubkey(public_key, compressed_hex)` | Register the agent's Bitcoin key so the contract can build change outputs |
 
 **Agent** — identity from `env::signer_account_pk()`, never a parameter:
 
 | Method | |
 |---|---|
-| `request_transfer(chain, destination, amount, params, idempotency_key)` | Returns `Signed`, `Refused`, `Duplicate` or `SigningFailed` |
+| `request_transfer(chain, asset, destination, amount, params, idempotency_key)` | Returns `Signed`, `Refused`, `Duplicate` or `SigningFailed` |
 | `on_signed(...)` | Private callback. Rejects any predecessor but the contract itself. |
 
 Attach about 300 TGas to `request_transfer`: the contract forwards 100 TGas to
@@ -232,18 +243,39 @@ owner's key, because there is no MCP tool for it — the agent cannot revoke
 itself, re-enable itself or change its own caps, since no such tool exists for
 it to be manipulated into calling.
 
+## Chains and assets
+
+| | |
+|---|---|
+| Base Sepolia — native ETH | Built, verified against viem, **payment landed on chain** |
+| Base Sepolia — ERC-20 | Built, verified against viem, signed on testnet |
+| Bitcoin testnet4 — P2WPKH | Built, verified against bitcoinjs-lib, signed on testnet |
+
+Bitcoin is one input, native segwit, one payment plus change to the Keyring's
+own address. Multiple inputs are not supported rather than half-supported.
+Bech32m (Taproot) addresses are refused, since Keyring cannot construct those
+spends.
+
+The Bitcoin address for the reference deployment is
+`tb1qthnksfdpen20ka34h9dhapdgttwxcdr4z4nhgm`. Funding it is all that
+stands between the verified signature and a broadcast spend.
+
 ## Known limitations
 
 Read `docs/threat-model.md` for the full list. The ones that matter most:
 
 1. **A compromised agent key can still spend the remaining 24-hour budget** to an
    allowlisted destination. Keyring bounds blast radius; it does not eliminate it.
-2. **Budgets are per agent and per chain — there is no owner-wide cap.** An owner
-   running N agents each capped at C per 24h is exposed to N x C. A policy that
-   reads as "2 ETH per 24h" limits that *agent*, not the keyring. An aggregate
-   owner-level budget is a candidate future capability, not current behaviour.
-3. **Bitcoin fee caps would rest on UTXO data the contract cannot verify.** Open
-   issue, must be resolved before any Bitcoin claim (`security-decisions.md` §8).
+2. **Owner-wide budgets are opt-in.** Per-agent caps bound one agent. Unless
+   the owner sets a keyring-wide cap, N agents each capped at C still expose
+   the owner to N x C — a policy reading "2 ETH per 24h" limits that *agent*.
+   `set_aggregate_budget` bounds the total; nothing sets it by default.
+3. **No Bitcoin or ERC-20 transaction has been broadcast.** Both are
+   constructed, signed by the real MPC network and verified against independent
+   references, but the derived addresses hold no testnet4 BTC and no test
+   tokens. The fee-cap concern that originally blocked Bitcoin is resolved:
+   BIP143 commits the input amount, so a relayer that misreports it produces an
+   unusable signature (`security-decisions.md` §23).
 4. **Replay protection is bounded** at 32 idempotency keys per agent. The uncaught
    case is a second within-policy payment, never an over-limit one.
 5. **A failed broadcast still consumes budget** until the window rolls. Deliberate:

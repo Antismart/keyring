@@ -391,3 +391,157 @@ Request 4 is decision 20 working on a live deployment. The caller supplied
 inflated gas parameters (200000 gas at 1000 gwei); the contract derived the
 real ceiling from them and refused. Under the old design the caller would have
 declared the fee itself and this would have been signed.
+
+## 23. Bitcoin fee caps *are* enforceable — superseding decision 8
+
+**Settled. This resolves the open issue in decision 8.**
+
+Decision 8 held that a Bitcoin fee cap might be unenforceable, because a fee is
+`sum(inputs) - sum(outputs)` and the input values come from the semi-trusted
+relayer, which the contract cannot check against the UTXO set.
+
+**BIP143 settles it.** A segwit v0 sighash commits the `amount` of the input
+being spent. A relayer that misreports a UTXO value therefore gets a signature
+over the wrong preimage: it fails verification against the real UTXO and the
+network rejects the transaction. The value the contract computes the fee from
+is the same value the signature is bound to, so the fee cap is sound.
+
+This was verified, not reasoned about: `amount_sensitivity` in
+`tests/fixtures/bitcoin.json` records the sighash changing when the claimed
+input value changes by a single satoshi, and
+`the_sighash_commits_to_the_input_amount` fails if that ever stops holding.
+
+The residual risk decision 8 described is gone. What a hostile relayer can
+still do on Bitcoin is supply a stale or already-spent UTXO, which makes the
+transaction unbroadcastable — an availability problem, not a spending one.
+
+## 24. Bitcoin scope: one input, native segwit only
+
+**Settled.** Exactly one P2WPKH input, one payment output, and at most one
+change output back to the Keyring's own address.
+
+CLAUDE.md §7 asks for the simplest spend type that can be verified safely and
+says not to claim multi-input support until it is tested end to end. Multiple
+inputs are therefore absent rather than half-built: each input needs its own
+sighash and its own signature, which means a different request lifecycle, and
+shipping that untested would be worse than not shipping it.
+
+Only witness version 0 with a 20-byte program is accepted. Bech32m addresses —
+Taproot and later — use a different checksum constant and are rejected, because
+paying one would produce an output this contract cannot construct a spend for.
+Mainnet addresses and bad checksums are refused by the same code path, and both
+are covered by negative fixtures that bitcoinjs-lib also rejects.
+
+Change below the dust threshold is dropped, which makes the remainder fee. The
+contract recomputes the fee from the outputs it actually built, so dropping
+dust cannot slip a larger fee past the cap. A test covers the case where a
+requested fee just under the cap becomes one just over it.
+
+## 25. The agent's Bitcoin key is registered by the owner
+
+**Settled, with a noted footgun.** The contract needs the agent's compressed
+Bitcoin public key to build the change output itself rather than trusting a
+script from the caller. It cannot derive that key: the key lives with the MPC
+network and there is no synchronous way to ask for it.
+
+So the owner registers it, with `set_agent_btc_pubkey`. Anyone can verify the
+value by calling `derived_public_key` on the signer with the agent's derivation
+path.
+
+**The footgun:** a wrong key sends change to an address the Keyring does not
+control, and the funds are lost. This is why the SDK's `deriveBitcoinKey`
+obtains the value from the signer rather than asking an operator to transcribe
+it, and why `get_addresses` reports whether the registered key matches the
+derived one. A Bitcoin spend is refused outright when no key is registered,
+rather than defaulting to anything.
+
+## 26. Owner-wide budgets are implemented — superseding decision 19
+
+**Settled. This closes the capability gap recorded in decision 19.**
+
+Decision 19 documented that caps bounded a single agent, so an owner running N
+agents each capped at C was exposed to N times C. A keyring may now carry
+owner-wide 24-hour ceilings per chain and asset, checked across every agent.
+
+The three concerns decision 19 raised were addressed as it anticipated:
+
+1. The evaluator takes a struct holding both the agent's and the keyring's spend
+   entries, so it remains a pure function of its inputs.
+2. The owner-wide cap is checked against a keyring-level ledger maintained
+   alongside the agent's, not by scanning every agent on each request.
+3. `revoke_agent` deliberately does not touch the keyring ledger. Clearing it
+   would make revoke-and-re-register a way to reset the owner-wide budget, and
+   a test exists solely to catch that.
+
+The rule is evaluated **last** among the numeric caps. The narrower limit is
+more useful to report, and an agent should not learn about other agents'
+spending until its own limits are satisfied.
+
+It remains opt-in. An empty budget leaves the previous behaviour untouched,
+which is what an owner wanting per-agent limits only should see.
+
+## 27. ERC-20 transfers are implemented — superseding decision 21
+
+**Settled. This closes decision 21 and makes invariant 7 real rather than
+vacuous.**
+
+Decision 21 recorded that token transfers were absent, so invariant 7 — that
+token calldata must be composed by the contract — had nothing to apply to.
+
+The transaction now takes an `EvmCall` enum whose only variants are a native
+transfer and an ERC-20 transfer. Neither carries caller-supplied bytes, so
+calldata cannot be attached at all: the guarantee is structural rather than a
+runtime check that could be missed. For a token transfer the contract targets
+the token contract, sends zero native value, and builds the
+`transfer(address,uint256)` call from the policy-approved token, recipient and
+amount.
+
+Amount limits moved from per-chain to per-asset at the same time, because a cap
+shared between an 18-decimal coin and a 6-decimal token would be meaningless.
+Fee caps stayed on the chain, since a fee is always paid in the native coin
+even for a token transfer.
+
+The selector is asserted against the keccak of its signature, so a typo in the
+constant cannot pass, and the calldata is checked against viem's
+`encodeFunctionData` byte for byte.
+
+**Not implemented:** the contract does not read a token's decimals or balance.
+Amounts are in the token's smallest unit, and a transfer exceeding the balance
+will revert on chain at the Keyring's expense in gas. Policy bounds how much
+may be *authorised*, not whether the token contract will honour it.
+
+## 28. `migrate_reset` discards state, and is a development tool
+
+**Settled, with an explicit warning.** The state layout changed incompatibly
+when limits moved per-asset, so old records could not be deserialised.
+`migrate_reset` installs fresh state under a new storage prefix version.
+
+A new `IterableMap` over the *same* prefix still reads whatever the previous
+layout wrote there — which is why the method takes a prefix version rather than
+simply constructing a new map. Discovering that required a failed deploy where
+`register_keyring` reported "keyring already registered" against supposedly
+empty state.
+
+The old entries are orphaned rather than deleted, so their storage stake stays
+locked. That is acceptable on a development account and is precisely why this is
+not a production migration: a deployment holding real policy needs a migration
+that preserves state, and this method should be removed before any such use.
+
+## 29. Verification of the three added capabilities
+
+Deployment: `keyring-gated-1794298589.testnet`.
+
+| Capability | Status |
+|---|---|
+| ERC-20 construction | Matches viem byte for byte, 2 fixtures; signed on testnet, calldata verified |
+| Bitcoin BIP143 sighash | Matches bitcoinjs-lib, 3 fixtures; signed on testnet and verified |
+| Bitcoin address/bech32 | Matches bitcoinjs-lib, incl. negative cases |
+| Owner-wide cap | Enforced on testnet: refused a request the agent's own cap allowed |
+| Bitcoin broadcast | **Not verified.** `tb1qthnksfdpen20ka34h9dhapdgttwxcdr4z4nhgm` holds no testnet4 BTC |
+| ERC-20 broadcast | **Not verified.** The derived address holds no test tokens |
+
+The Bitcoin signature was verified independently: the contract's sighash matches
+one recomputed with bitcoinjs-lib from chain data, the signature verifies
+against the MPC-derived key, and the key recovered from the signature is the
+same key. What remains unproven is only that such a transaction is accepted by
+the Bitcoin network, which needs a funded UTXO.
