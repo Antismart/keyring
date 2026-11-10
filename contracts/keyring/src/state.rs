@@ -114,6 +114,18 @@ pub struct Agent {
     pub requests_made: u64,
     /// Newest-last, bounded by [`MAX_IDEMPOTENCY_RECORDS`].
     pub recent_keys: Vec<IdempotencyRecord>,
+    /// The agent's MPC-derived Bitcoin public key, 33 bytes of compressed hex.
+    ///
+    /// Registered by the owner, because the contract cannot derive it: the key
+    /// lives with the MPC network and the contract has no way to ask for it
+    /// synchronously. It is needed so the contract can build the **change**
+    /// output itself rather than trusting a caller-supplied script.
+    ///
+    /// Anyone can verify it by calling `derived_public_key` on the signer with
+    /// this agent's derivation path. A wrong value sends change to an address
+    /// the Keyring does not control, so the SDK derives it rather than asking
+    /// an operator to type it.
+    pub btc_pubkey: Option<String>,
 }
 
 impl Agent {

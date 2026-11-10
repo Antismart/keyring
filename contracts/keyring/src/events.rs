@@ -129,3 +129,11 @@ pub fn aggregate_budget_changed(owner: &AccountId, budget: &crate::policy::Aggre
         json!({ "owner": owner, "aggregate": budget }),
     );
 }
+
+/// Emitted when the owner registers an agent's Bitcoin public key.
+pub fn agent_btc_key_set(owner: &AccountId, public_key: &PublicKey, compressed_hex: &str) {
+    emit(
+        "agent_btc_key_set",
+        json!({ "owner": owner, "public_key": public_key, "btc_pubkey": compressed_hex }),
+    );
+}

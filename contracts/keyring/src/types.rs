@@ -6,6 +6,7 @@
 //! cross-chain conversion: a limit expressed for one chain is never compared
 //! against an amount on another.
 
+use crate::bitcoin::BitcoinParams;
 use crate::evm::EvmParams;
 use near_sdk::near;
 
@@ -155,17 +156,30 @@ pub fn normalize_destination(chain: Chain, raw: &str) -> Option<String> {
 #[serde(rename_all = "snake_case")]
 pub enum ChainParams {
     Evm(EvmParams),
+    Bitcoin(BitcoinParams),
 }
 
 impl ChainParams {
     /// Whether these parameters are the right kind for `chain`.
     pub fn matches(&self, chain: Chain) -> bool {
-        matches!((self, chain), (ChainParams::Evm(_), Chain::BaseSepolia))
+        matches!(
+            (self, chain),
+            (ChainParams::Evm(_), Chain::BaseSepolia)
+                | (ChainParams::Bitcoin(_), Chain::BitcoinTestnet4)
+        )
     }
 
     pub fn as_evm(&self) -> Option<&EvmParams> {
         match self {
             ChainParams::Evm(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn as_bitcoin(&self) -> Option<&BitcoinParams> {
+        match self {
+            ChainParams::Bitcoin(p) => Some(p),
+            _ => None,
         }
     }
 }

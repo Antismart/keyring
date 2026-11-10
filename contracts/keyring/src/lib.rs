@@ -43,6 +43,7 @@
 //! the *absence* of any dangerous parameter in this method surface, not on a
 //! construction test. Gate D/E must close that gap.
 
+pub mod bitcoin;
 pub mod events;
 pub mod evm;
 pub mod mpc;
@@ -206,6 +207,7 @@ impl Contract {
             created_at_ms: env::block_timestamp_ms(),
             requests_made: 0,
             recent_keys: Vec::new(),
+            btc_pubkey: None,
         });
 
         self.agent_owner.insert(public_key.clone(), owner.clone());
@@ -253,6 +255,31 @@ impl Contract {
     /// The keyring-wide budget, and what has been committed against it.
     pub fn get_aggregate_budget(&self, owner: AccountId) -> Option<AggregateBudget> {
         Some(self.keyrings.get(&owner)?.aggregate.clone())
+    }
+
+    /// Registers the agent's MPC-derived Bitcoin public key. Owner only.
+    ///
+    /// The contract needs this to build the **change** output of a Bitcoin
+    /// spend itself, instead of trusting a script from the caller. It cannot
+    /// derive the key: the key lives with the MPC network, and there is no
+    /// synchronous way to ask for it.
+    ///
+    /// The value is verifiable by anyone — call `derived_public_key` on the
+    /// signer with this agent's derivation path — but a wrong value sends
+    /// change to an address the Keyring does not control, so the SDK derives
+    /// it rather than relying on an operator to transcribe it.
+    pub fn set_agent_btc_pubkey(&mut self, public_key: PublicKey, compressed_hex: String) {
+        let owner = env::predecessor_account_id();
+        require!(
+            bitcoin::p2wpkh_script_from_pubkey(&compressed_hex).is_some(),
+            "expected a 33-byte compressed secp256k1 public key in hex"
+        );
+        let keyring = self.require_keyring_mut(&owner);
+        let agent = keyring
+            .agent_mut(&public_key)
+            .unwrap_or_else(|| env::panic_str("no such agent for this owner"));
+        agent.btc_pubkey = Some(compressed_hex.clone());
+        events::agent_btc_key_set(&owner, &public_key, &compressed_hex);
     }
 
     /// Flips an agent's kill switch. Owner only.
@@ -331,13 +358,6 @@ impl Contract {
             params.matches(chain),
             "transaction parameters do not match the requested chain"
         );
-        // Bitcoin construction is Gate E. Refusing here is deliberate: signing
-        // anything other than a real transaction for a chain the caller asked
-        // for would be worse than refusing outright.
-        require!(
-            chain == Chain::BaseSepolia,
-            "transaction construction for this chain is not implemented"
-        );
 
         require!(
             asset.is_valid_for(chain),
@@ -353,18 +373,31 @@ impl Contract {
                     .unwrap_or_else(|| env::panic_str("token is not a valid contract address")),
             },
         };
-        let kind = match &asset {
-            Asset::Native => evm::EvmCallKind::Native,
-            Asset::Erc20 { .. } => evm::EvmCallKind::Erc20,
-        };
-
-        // The fee is DERIVED from the same gas numbers that enter the signed
-        // transaction, never taken from the caller (invariant 9).
-        let evm = params.as_evm().expect("checked above");
-        if let Err(e) = evm.validate(kind) {
-            env::panic_str(&format!("invalid transaction parameters: {}", e.message()));
-        }
-        let fee = U128(evm.max_fee_wei().expect("validated above"));
+        // The fee is DERIVED on both chains, never taken from the caller
+        // (invariant 9). On EVM it is gas_limit * max_fee_per_gas; on Bitcoin
+        // it is inputs minus outputs, which BIP143 binds the signature to.
+        let fee = U128(match chain {
+            Chain::BaseSepolia => {
+                let kind = match &asset {
+                    Asset::Native => evm::EvmCallKind::Native,
+                    Asset::Erc20 { .. } => evm::EvmCallKind::Erc20,
+                };
+                let evm = params.as_evm().expect("checked above");
+                if let Err(e) = evm.validate(kind) {
+                    env::panic_str(&format!("invalid transaction parameters: {}", e.message()));
+                }
+                evm.max_fee_wei().expect("validated above")
+            }
+            Chain::BitcoinTestnet4 => {
+                let btc = params.as_bitcoin().expect("checked above");
+                match bitcoin::effective_fee(btc, amount.0) {
+                    Ok(f) => u128::from(f),
+                    Err(e) => {
+                        env::panic_str(&format!("invalid transaction parameters: {}", e.message()))
+                    }
+                }
+            }
+        });
 
         let agent_pk = env::signer_account_pk();
         let owner = self
@@ -409,9 +442,10 @@ impl Contract {
             });
         }
 
-        // Captured before the mutable borrow ends; the derivation path is built
-        // from contract state, never from a caller parameter.
+        // Captured before the mutable borrow ends; both come from contract
+        // state, never from a caller parameter.
         let agent_label = agent.label.clone();
+        let agent_btc_pubkey = agent.btc_pubkey.clone();
 
         agent.prune_expired(now);
 
@@ -526,33 +560,22 @@ impl Contract {
         // approved. The caller contributed no bytes to the preimage: the
         // recipient and value come from the validated request, and the gas
         // numbers are the ones the fee cap was just checked against.
-        let to = evm::address_bytes(&stored_destination)
-            .unwrap_or_else(|| env::panic_str("validated destination is not a 20-byte address"));
-        // The call is composed here from validated state. For a token transfer
-        // the calldata is built by the contract from the policy-approved token,
-        // recipient and amount; there is no field in which a caller could
-        // supply calldata of its own (invariant 7).
-        let call = match &asset {
-            Asset::Native => evm::EvmCall::NativeTransfer {
-                to,
-                value: amount.0,
-            },
-            Asset::Erc20 { token } => evm::EvmCall::Erc20Transfer {
-                token: evm::address_bytes(token)
-                    .unwrap_or_else(|| env::panic_str("validated token is not an address")),
-                to,
-                amount: amount.0,
-            },
+        let payload = match chain {
+            Chain::BaseSepolia => self.build_evm_payload(
+                params.as_evm().expect("checked above"),
+                &asset,
+                &stored_destination,
+                amount.0,
+            ),
+            Chain::BitcoinTestnet4 => bitcoin::build_spend(
+                params.as_bitcoin().expect("checked above"),
+                &stored_destination,
+                amount.0,
+                agent_btc_pubkey.as_ref(),
+            )
+            .map(|spend| spend.sighash())
+            .unwrap_or_else(|e| env::panic_str(&format!("cannot build spend: {}", e.message()))),
         };
-        let tx = evm::Eip1559Transaction {
-            chain_id: evm::BASE_SEPOLIA_CHAIN_ID,
-            nonce: evm.nonce.0,
-            max_priority_fee_per_gas: evm.max_priority_fee_per_gas.0,
-            max_fee_per_gas: evm.max_fee_per_gas.0,
-            gas_limit: evm.gas_limit.0,
-            call,
-        };
-        let payload = tx.signing_hash();
         let payload_hex = mpc::to_hex(&payload);
         let path = signer::derivation_path(&owner, &agent_label, chain.as_str());
 
@@ -708,15 +731,30 @@ impl Contract {
                     .unwrap_or_else(|| env::panic_str("token is not a valid contract address")),
             },
         };
-        let kind = match &asset {
-            Asset::Native => evm::EvmCallKind::Native,
-            Asset::Erc20 { .. } => evm::EvmCallKind::Erc20,
-        };
-        let evm = params.as_evm().expect("checked above");
-        if let Err(e) = evm.validate(kind) {
-            env::panic_str(&format!("invalid transaction parameters: {}", e.message()));
-        }
-        let fee = U128(evm.max_fee_wei().expect("validated above"));
+        // Derived by the same code path as a real request, so a simulation
+        // cannot report a different fee than the request would compute.
+        let fee = U128(match chain {
+            Chain::BaseSepolia => {
+                let kind = match &asset {
+                    Asset::Native => evm::EvmCallKind::Native,
+                    Asset::Erc20 { .. } => evm::EvmCallKind::Erc20,
+                };
+                let evm = params.as_evm().expect("checked above");
+                if let Err(e) = evm.validate(kind) {
+                    env::panic_str(&format!("invalid transaction parameters: {}", e.message()));
+                }
+                evm.max_fee_wei().expect("validated above")
+            }
+            Chain::BitcoinTestnet4 => {
+                let btc = params.as_bitcoin().expect("checked above");
+                match bitcoin::effective_fee(btc, amount.0) {
+                    Ok(f) => u128::from(f),
+                    Err(e) => {
+                        env::panic_str(&format!("invalid transaction parameters: {}", e.message()))
+                    }
+                }
+            }
+        });
 
         let keyring = self
             .keyrings
@@ -866,6 +904,41 @@ impl Contract {
     }
 
     // ------------------------------------------------------------------ internal
+
+    /// Builds the EVM signing payload from validated fields.
+    ///
+    /// The call is composed here from contract state. For a token transfer the
+    /// calldata is built from the policy-approved token, recipient and amount;
+    /// there is no field in which a caller could supply calldata of its own
+    /// (invariant 7).
+    fn build_evm_payload(
+        &self,
+        evm: &evm::EvmParams,
+        asset: &Asset,
+        destination: &str,
+        amount: u128,
+    ) -> [u8; 32] {
+        let to = evm::address_bytes(destination)
+            .unwrap_or_else(|| env::panic_str("validated destination is not a 20-byte address"));
+        let call = match asset {
+            Asset::Native => evm::EvmCall::NativeTransfer { to, value: amount },
+            Asset::Erc20 { token } => evm::EvmCall::Erc20Transfer {
+                token: evm::address_bytes(token)
+                    .unwrap_or_else(|| env::panic_str("validated token is not an address")),
+                to,
+                amount,
+            },
+        };
+        evm::Eip1559Transaction {
+            chain_id: evm::BASE_SEPOLIA_CHAIN_ID,
+            nonce: evm.nonce.0,
+            max_priority_fee_per_gas: evm.max_priority_fee_per_gas.0,
+            max_fee_per_gas: evm.max_fee_per_gas.0,
+            gas_limit: evm.gas_limit.0,
+            call,
+        }
+        .signing_hash()
+    }
 
     /// Moves a request to a new status and emits the transition.
     fn set_status(&mut self, request_id: u64, status: RequestStatus) {
