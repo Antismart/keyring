@@ -83,7 +83,7 @@ credentials and no network.
 | A — foundation | **Met.** Builds, lint clean, interfaces documented, mock signer available. |
 | B — policy correctness | **Met.** 72 Rust tests: every rule at both sides of its boundary, access control, aggregate budget, MPC success and failure paths. Partial signing does not apply to the single-payload secp256k1 flow. |
 | C — real NEAR signing | **Met.** Deployed to testnet, real signature from the live signer, callback lifecycle tested, signature independently verified, no direct agent-to-MPC path. |
-| D — Base Sepolia e2e | **Mostly met.** EIP-1559 built in-contract and matched against viem; signature recovers to the derived address; node accepts the transaction. **Outstanding:** the derived address is unfunded, so no transaction is in a block yet. |
+| D — Base Sepolia e2e | **Met.** EIP-1559 built in-contract and matched against viem, signed by the live MPC network, included in block 56892318. Destination, per-request and fee-cap refusals all returned before signing. |
 | E — Bitcoin e2e | Not started. Blocked on the fee-cap/UTXO issue in `security-decisions.md` section 8. |
 | ERC-20 | Not implemented; the transaction struct has no calldata field (decision 21). |
 | F — agent workflow | Not started. |
@@ -133,6 +133,7 @@ A `request_transfer` call must attach about 300 TGas: the contract forwards
 | Keyring contract | `keyring-gated-1794298589.testnet` |
 | Derived address | `0xbd0748719c9defaff838e0a810a00b0eb563cc53` |
 | Chain id | 84532 (confirmed via `eth_chainId`) |
+| Verified payment | [`0x03f49320c7aa0dcd2126f2a1ab247e0025b1aef8fa23955ab6bfc4d9bce43014`](https://sepolia.basescan.org/tx/0x03f49320c7aa0dcd2126f2a1ab247e0025b1aef8fa23955ab6bfc4d9bce43014) |
 
 ```bash
 # Regenerate the viem reference fixtures, or check them without writing

@@ -356,28 +356,38 @@ simply absent: the invariant is vacuous because the capability does not exist.
 A test asserts the encoded transaction ends with empty data and an empty access
 list, so adding calldata would be a deliberate, visible change.
 
-## 22. Gate D verification, and what remains unproven
+## 22. Gate D verification
 
-**The transaction path is verified; the broadcast is not.**
+**Complete.** An allowed transfer was built, signed and included in a block on
+Base Sepolia, and three kinds of disallowed transfer were refused before any
+MPC call.
 
-Verified:
+| | |
+|---|---|
+| Keyring contract | `keyring-gated-1794298589.testnet` |
+| Derived address | `0xbd0748719c9defaff838e0a810a00b0eb563cc53` |
+| Transaction | `0x03f49320c7aa0dcd2126f2a1ab247e0025b1aef8fa23955ab6bfc4d9bce43014` |
+| Block | 56892318, status success, 21000 gas |
 
-- The contract's EIP-1559 encoding matches viem byte for byte across five
-  fixtures, including RLP's awkward cases: zero (which must encode as the empty
-  string, not `0x00`), the `0x7f`/`0x80` single-byte boundary, and a payload
-  long enough to require the >55-byte list header.
-- The MPC signature over that hash recovers to the Keyring address the signer
-  derives for the agent, confirming the transaction is signed by the key policy
-  governs.
-- Base Sepolia's own node parsed the transaction, recovered its sender and
-  checked that sender's balance. A malformed or badly signed transaction is
-  rejected before a balance lookup, so reaching `insufficient funds` is itself
-  evidence the transaction is well formed and correctly signed.
+What the chain's own record confirms: `from` is the derived Keyring address,
+`to` is the allowlisted destination, `value` is exactly the approved amount,
+`chainId` is 84532 and `type` is `0x2`. The contract-built transaction and the
+transaction the network executed are the same one.
 
-Not verified: the transaction has **not** been included in a block. The derived
-address `0xbd0748719c9defaff838e0a810a00b0eb563cc53` holds no ETH, and
-Base Sepolia faucets require interactive verification. The signature is valid
-and does not need regenerating; `scripts/broadcast-evm.mjs` re-runs the checks
-and sends it once the address is funded.
+The fee cap held in practice, which is the point of decision 20. Policy checked
+a ceiling of 252,000,021,000 wei (`21000 * 12000001`), and the transaction
+actually paid 168,000,000,165 wei. The ceiling bounds the real cost, so a signed
+transaction cannot cost more than policy permitted whatever the network does.
 
-Deployment used: `keyring-gated-1794298589.testnet`.
+Refusals verified on the same deployment, each returned before any signing:
+
+| Request | Code | Limit vs observed |
+|---|---|---|
+| 2 | `destination_not_allowed` | — |
+| 3 | `per_request_cap_exceeded` | 1,000,000,000,000 vs 1,000,000,000,001 |
+| 4 | `fee_cap_exceeded` | 100,000,000,000,000 vs 200,000,000,000,000,000 |
+
+Request 4 is decision 20 working on a live deployment. The caller supplied
+inflated gas parameters (200000 gas at 1000 gwei); the contract derived the
+real ceiling from them and refused. Under the old design the caller would have
+declared the fee itself and this would have been signed.

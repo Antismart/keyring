@@ -229,9 +229,8 @@ compromised *owner*.
 2. Bitcoin fee caps rest on UTXO data the contract cannot verify (decision 8).
 3. Replay protection is bounded at 32 keys per agent (decision 6).
 4. A failed broadcast still consumes budget until the window rolls (decision 4).
-5. EVM transaction construction is proven against viem, but **no transaction
-   has been included in a block**: the derived address is unfunded. Bitcoin
-   construction (invariant 8) remains entirely unimplemented.
+5. Bitcoin construction (invariant 8) is entirely unimplemented, and its
+   fee-cap problem (decision 8) is unresolved.
 6. A failed signing consumes budget until the window rolls (decision 16).
 7. The mirrored MPC wire types must be re-checked whenever the signer contract
    is upgraded (decision 14).
@@ -249,5 +248,8 @@ compromised *owner*.
 | Real MPC signing | **Verified on testnet.** `keyring-gatec-1794295861.testnet`, request 1, `mock: false` |
 | Signature correctness | **Independently verified.** `scripts/verify-signature.mjs`, 8/8 checks |
 | No direct agent-to-MPC path | **Verified.** The agent-derived key differs from the contract-derived key |
-| Any foreign-chain transaction | **Not verified.** Not implemented; Gate C signs a domain-separated commitment, not a transaction |
-| Broadcast to any chain | **Not verified.** Not implemented. |
+| EVM transaction construction | **Verified against viem**, 5 fixtures incl. RLP edge cases |
+| Base Sepolia payment | **Verified on chain.** Block 56892318, sender recovers to the derived address |
+| Fee cap bounds real cost | **Verified.** Ceiling 252,000,021,000 wei; actual 168,000,000,165 wei |
+| Bitcoin transaction | **Not verified.** Not implemented. |
+| ERC-20 transfer | **Not implemented** — no calldata field exists (decision 21). |

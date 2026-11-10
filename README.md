@@ -12,7 +12,7 @@ via NEAR Chain Signatures (MPC).
 
 ---
 
-## Status: Gate D (transaction path verified, broadcast pending funding)
+## Status: Gate D of F — a real payment on Base Sepolia
 
 This is early, honest-about-itself infrastructure. What exists today:
 
@@ -25,17 +25,21 @@ This is early, honest-about-itself infrastructure. What exists today:
 | ✅ **EIP-1559 construction** | Built in-contract, matches **viem** byte for byte across 5 fixtures |
 | ✅ **Signature → address** | The MPC signature recovers to the derived Keyring address |
 | ✅ **Typed SDK + MCP surface** | 28 TypeScript tests |
-| ⚠️ **Broadcast on Base Sepolia** | Transaction is valid and accepted by the node, but the derived address is **unfunded**, so nothing has been included in a block yet. |
+| ✅ **Payment on Base Sepolia** | [Included in block 56892318](https://sepolia.basescan.org/tx/0x03f49320c7aa0dcd2126f2a1ab247e0025b1aef8fa23955ab6bfc4d9bce43014), 21000 gas, status success |
+| ✅ **Refusals before signing** | Destination, per-request cap and fee cap, each with a structured reason |
 | ⬜ **Bitcoin** | Not implemented. |
 | ⬜ **ERC-20 transfers** | Not implemented — the transaction has no calldata field at all. |
 
-**Nothing here has been audited or used to move value of any kind.** 119 tests
-pass. Keyring now builds a real Base Sepolia transaction and gets it signed by
-the live MPC network, and the resulting transaction is well formed enough that
-Base Sepolia's own node parses it, recovers the sender and checks that address's
-balance. But the derived address holds no ETH, so **no transaction has yet been
-included in a block.** Fund `0xbd0748719c9defaff838e0a810a00b0eb563cc53` on
-Base Sepolia and `scripts/broadcast-evm.mjs` will send it.
+**Nothing here has been audited, and nothing has touched mainnet or real
+value.** 119 tests pass, and the end-to-end path is real: an agent requested a
+payment, the contract checked it against policy, built the EIP-1559 transaction
+itself, had it signed by the live NEAR MPC network, and the transaction was
+included in a Base Sepolia block. Disallowed requests are refused before any
+signature is requested.
+
+What that payment proves, and what it does not: Keyring moved testnet ETH under
+policy. It has not been audited, Bitcoin is unimplemented, and ERC-20 transfers
+are absent by design (the transaction has no calldata field at all).
 
 A mock signature is never presented as a real one: `StoredSignature.mock` is
 persisted on every request, so the distinction survives into any dashboard,
