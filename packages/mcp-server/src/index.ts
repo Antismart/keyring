@@ -14,3 +14,4 @@
  */
 
 export * from "./tools.js";
+export { main } from "./server.js";
