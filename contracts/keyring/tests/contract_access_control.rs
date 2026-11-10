@@ -328,6 +328,79 @@ fn spend_ages_out_of_the_rolling_window() {
     ok_id(&transfer(&mut c, pk(1), ONE_ETH, "d", next_day));
 }
 
+// ------------------------------------------- scope of the rolling budget
+
+#[test]
+fn each_agent_has_its_own_budget_and_there_is_no_owner_wide_cap() {
+    // The rolling cap bounds an AGENT, not a KEYRING. The spend ledger lives on
+    // the agent and is keyed by chain, and the evaluator is handed only that
+    // agent's entries, so one owner's agents do not share a budget.
+    //
+    // The consequence, made explicit here so it cannot be assumed away: an
+    // owner running N agents each capped at C per 24h is exposed to N * C.
+    // This test documents current behaviour. If an owner-wide aggregate budget
+    // is ever added, it must fail.
+    let mut c = setup();
+    ctx(OWNER, pk(0), at_utc(12, 0));
+    c.register_agent(pk(2), "agent-two".to_string(), evm_policy());
+
+    // Agent one spends its entire 2 ETH daily cap.
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "a1", at_utc(12, 0)));
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "a2", at_utc(12, 1)));
+    assert_eq!(
+        refusal(&transfer(&mut c, pk(1), 1, "a3", at_utc(12, 2))),
+        RefusalCode::DailyCapExceeded,
+        "agent one must be capped once it reaches its own limit"
+    );
+
+    // Agent two is unaffected: its budget is independent.
+    ok_id(&transfer(&mut c, pk(2), ONE_ETH, "b1", at_utc(12, 3)));
+    ok_id(&transfer(&mut c, pk(2), ONE_ETH, "b2", at_utc(12, 4)));
+
+    // The owner has therefore authorised 4 ETH in one day under two policies
+    // that each read as a 2 ETH limit.
+    let one: u128 = c
+        .get_agent(account(OWNER), pk(1))
+        .unwrap()
+        .ledgers
+        .iter()
+        .flat_map(|l| &l.entries)
+        .map(|e| e.amount.0)
+        .sum();
+    let two: u128 = c
+        .get_agent(account(OWNER), pk(2))
+        .unwrap()
+        .ledgers
+        .iter()
+        .flat_map(|l| &l.entries)
+        .map(|e| e.amount.0)
+        .sum();
+    assert_eq!(one, 2 * ONE_ETH);
+    assert_eq!(two, 2 * ONE_ETH);
+    assert_eq!(
+        one + two,
+        4 * ONE_ETH,
+        "no owner-wide cap constrains the total"
+    );
+}
+
+#[test]
+fn an_agents_budget_is_tracked_separately_for_each_chain() {
+    // Caps are per chain because base units differ: 1 ETH of wei and 1 BTC of
+    // satoshi are not comparable quantities. Spending on one chain must not
+    // consume another chain's budget.
+    let mut c = setup();
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "e1", at_utc(12, 0)));
+
+    let agent = c.get_agent(account(OWNER), pk(1)).unwrap();
+    assert_eq!(
+        agent.ledgers.len(),
+        1,
+        "only the chain actually used is tracked"
+    );
+    assert_eq!(agent.ledgers[0].chain, Chain::BaseSepolia);
+}
+
 // ------------------------------------------------------- views do not mutate
 
 #[test]
