@@ -1,0 +1,25 @@
+[package]
+name = "keyring-contract"
+description = "Policy-enforced wallet infrastructure for AI agents (NEAR contract)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# NEP-330 reproducible-build metadata is intentionally absent.
+#
+# `cargo near new` emits `sourcescan/cargo-near:0.18.0-rust-1.86.0`, but that
+# image ships rustc 1.86 and near-sdk 5.30.1 requires >= 1.95, so a build inside
+# it would fail exactly as a local 1.86 build does. Restoring this block needs a
+# sourcescan image with rustc >= 1.95 AND its real sha256 digest, which must be
+# read from the registry rather than guessed. Tracked for Gate C.
+
+[dependencies]
+near-sdk.workspace = true
+
+[dev-dependencies]
+near-sdk = { workspace = true, features = ["unit-testing"] }

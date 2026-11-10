@@ -1,0 +1,504 @@
+//! Policy model, refusal taxonomy and the deterministic policy evaluator.
+//!
+//! This module is the policy enforcement boundary described in CLAUDE.md §4. It
+//! is deliberately free of NEAR cross-contract machinery and of signing logic:
+//! it is pure integer logic over validated structured fields, so every rule can
+//! be tested on both sides of its boundary (§10) without a blockchain.
+
+use crate::types::{normalize_destination, Chain, MAX_DESTINATION_LEN};
+use near_sdk::json_types::U128;
+use near_sdk::near;
+
+/// Maximum number of per-chain policy entries on one agent. Bounds state growth.
+pub const MAX_CHAIN_POLICIES: usize = 4;
+/// Maximum number of allowlisted destinations per chain. Bounds state growth.
+pub const MAX_DESTINATIONS: usize = 32;
+/// Rolling spending window length. CLAUDE.md §3 fixes this at 24 hours.
+pub const ROLLING_WINDOW_MS: u64 = 24 * 60 * 60 * 1_000;
+/// Minutes in a day, for time-window validation.
+pub const MINUTES_PER_DAY: u32 = 24 * 60;
+
+/// A UTC time-of-day window during which an agent may transact.
+///
+/// Expressed in minutes from UTC midnight. The window is half-open:
+/// `[start_minute, end_minute)`.
+///
+/// When `start_minute > end_minute` the window wraps midnight (an "overnight"
+/// window, e.g. 22:00–06:00), which CLAUDE.md §10 requires us to support and
+/// test explicitly. `start_minute == end_minute` is rejected at validation time
+/// as ambiguous rather than being silently read as "always" or "never".
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TimeWindow {
+    pub start_minute: u32,
+    pub end_minute: u32,
+}
+
+impl TimeWindow {
+    /// Whether this window is syntactically valid.
+    pub fn is_valid(&self) -> bool {
+        self.start_minute < MINUTES_PER_DAY
+            && self.end_minute < MINUTES_PER_DAY
+            && self.start_minute != self.end_minute
+    }
+
+    /// Whether the window wraps past midnight.
+    pub fn is_overnight(&self) -> bool {
+        self.start_minute > self.end_minute
+    }
+
+    /// Whether `minute_of_day` falls inside the window.
+    pub fn contains(&self, minute_of_day: u32) -> bool {
+        if self.is_overnight() {
+            minute_of_day >= self.start_minute || minute_of_day < self.end_minute
+        } else {
+            minute_of_day >= self.start_minute && minute_of_day < self.end_minute
+        }
+    }
+}
+
+/// Per-chain limits.
+///
+/// Limits are per chain by construction, because a single cross-chain cap would
+/// be meaningless: `max_per_request` is in wei on Base Sepolia and in satoshi on
+/// Bitcoin testnet4. The presence of a `ChainPolicy` for a chain *is* the chain
+/// allowlist — an agent with no entry for a chain cannot transact on it.
+#[near(serializers = [json, borsh])]
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ChainPolicy {
+    pub chain: Chain,
+    /// Largest single transfer, in base units.
+    pub max_per_request: U128,
+    /// Largest total spend in any rolling 24-hour window, in base units.
+    pub max_per_24h: U128,
+    /// Largest acceptable network fee for one transaction, in base units.
+    pub max_fee: U128,
+    /// Addresses this agent may pay. Empty means the agent may pay nobody on
+    /// this chain; it is never read as "anyone".
+    pub allowed_destinations: Vec<String>,
+}
+
+/// The complete policy attached to one agent.
+#[near(serializers = [json, borsh])]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Policy {
+    pub chains: Vec<ChainPolicy>,
+    /// Optional UTC time-of-day restriction. `None` means no time restriction.
+    pub time_window: Option<TimeWindow>,
+}
+
+impl Policy {
+    pub fn chain_policy(&self, chain: Chain) -> Option<&ChainPolicy> {
+        self.chains.iter().find(|c| c.chain == chain)
+    }
+}
+
+/// Why a policy was rejected as malformed, when an owner tries to set it.
+///
+/// This is distinct from a refusal: a refusal is a well-formed request denied by
+/// a valid policy, whereas this is an invalid policy that is never stored.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PolicyError {
+    TooManyChainPolicies,
+    DuplicateChain,
+    TooManyDestinations,
+    InvalidDestination(String),
+    DestinationTooLong,
+    InvalidTimeWindow,
+    /// A per-request cap above the 24h cap can never bind, which is almost
+    /// always an owner mistake. Reject it rather than store a misleading policy.
+    PerRequestCapAboveDailyCap,
+    ZeroCap,
+}
+
+impl PolicyError {
+    pub fn message(&self) -> String {
+        match self {
+            PolicyError::TooManyChainPolicies => {
+                format!("at most {MAX_CHAIN_POLICIES} chain policies are allowed")
+            }
+            PolicyError::DuplicateChain => "each chain may appear at most once".to_string(),
+            PolicyError::TooManyDestinations => {
+                format!("at most {MAX_DESTINATIONS} destinations per chain are allowed")
+            }
+            PolicyError::InvalidDestination(d) => {
+                format!("destination is not a valid address for its chain: {d}")
+            }
+            PolicyError::DestinationTooLong => {
+                format!("destination exceeds {MAX_DESTINATION_LEN} characters")
+            }
+            PolicyError::InvalidTimeWindow => {
+                "time window minutes must be < 1440 and start must differ from end".to_string()
+            }
+            PolicyError::PerRequestCapAboveDailyCap => {
+                "max_per_request must not exceed max_per_24h".to_string()
+            }
+            PolicyError::ZeroCap => {
+                "caps must be greater than zero; disable the agent instead".to_string()
+            }
+        }
+    }
+}
+
+/// Validates and canonicalises an owner-supplied policy.
+///
+/// Returns the policy with every destination normalised, so that stored policy
+/// and request-time comparison use exactly the same representation.
+pub fn validate_policy(mut policy: Policy) -> Result<Policy, PolicyError> {
+    if policy.chains.len() > MAX_CHAIN_POLICIES {
+        return Err(PolicyError::TooManyChainPolicies);
+    }
+    if let Some(w) = policy.time_window {
+        if !w.is_valid() {
+            return Err(PolicyError::InvalidTimeWindow);
+        }
+    }
+
+    let mut seen: Vec<Chain> = Vec::new();
+    for cp in policy.chains.iter_mut() {
+        if seen.contains(&cp.chain) {
+            return Err(PolicyError::DuplicateChain);
+        }
+        seen.push(cp.chain);
+
+        if cp.allowed_destinations.len() > MAX_DESTINATIONS {
+            return Err(PolicyError::TooManyDestinations);
+        }
+        if cp.max_per_request.0 == 0 || cp.max_per_24h.0 == 0 {
+            return Err(PolicyError::ZeroCap);
+        }
+        if cp.max_per_request.0 > cp.max_per_24h.0 {
+            return Err(PolicyError::PerRequestCapAboveDailyCap);
+        }
+
+        let mut normalized = Vec::with_capacity(cp.allowed_destinations.len());
+        for dest in cp.allowed_destinations.iter() {
+            if dest.len() > MAX_DESTINATION_LEN {
+                return Err(PolicyError::DestinationTooLong);
+            }
+            let canon = normalize_destination(cp.chain, dest)
+                .ok_or_else(|| PolicyError::InvalidDestination(dest.clone()))?;
+            if !normalized.contains(&canon) {
+                normalized.push(canon);
+            }
+        }
+        cp.allowed_destinations = normalized;
+    }
+    Ok(policy)
+}
+
+/// Stable machine-readable refusal codes.
+///
+/// These are part of the public API: the SDK, the MCP server and the demo all
+/// branch on them, so the string forms must not change casually. CLAUDE.md §13
+/// treats the refusal as a product feature, not an error to hide.
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalCode {
+    AgentNotRegistered,
+    AgentDisabled,
+    ChainNotAllowed,
+    MalformedDestination,
+    DestinationNotAllowed,
+    OutsideTimeWindow,
+    AmountZero,
+    PerRequestCapExceeded,
+    FeeCapExceeded,
+    DailyCapExceeded,
+    BudgetLedgerFull,
+    DuplicateRequest,
+}
+
+impl RefusalCode {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            RefusalCode::AgentNotRegistered => "agent_not_registered",
+            RefusalCode::AgentDisabled => "agent_disabled",
+            RefusalCode::ChainNotAllowed => "chain_not_allowed",
+            RefusalCode::MalformedDestination => "malformed_destination",
+            RefusalCode::DestinationNotAllowed => "destination_not_allowed",
+            RefusalCode::OutsideTimeWindow => "outside_time_window",
+            RefusalCode::AmountZero => "amount_zero",
+            RefusalCode::PerRequestCapExceeded => "per_request_cap_exceeded",
+            RefusalCode::FeeCapExceeded => "fee_cap_exceeded",
+            RefusalCode::DailyCapExceeded => "daily_cap_exceeded",
+            RefusalCode::BudgetLedgerFull => "budget_ledger_full",
+            RefusalCode::DuplicateRequest => "duplicate_request",
+        }
+    }
+
+    /// The policy rule this refusal came from, for audit and dashboard grouping.
+    pub const fn rule(&self) -> &'static str {
+        match self {
+            RefusalCode::AgentNotRegistered | RefusalCode::AgentDisabled => "agent_state",
+            RefusalCode::ChainNotAllowed => "chain_allowlist",
+            RefusalCode::MalformedDestination | RefusalCode::DestinationNotAllowed => {
+                "destination_allowlist"
+            }
+            RefusalCode::OutsideTimeWindow => "time_window",
+            RefusalCode::AmountZero | RefusalCode::PerRequestCapExceeded => "per_request_cap",
+            RefusalCode::FeeCapExceeded => "fee_cap",
+            RefusalCode::DailyCapExceeded | RefusalCode::BudgetLedgerFull => "rolling_24h_cap",
+            RefusalCode::DuplicateRequest => "idempotency",
+        }
+    }
+}
+
+/// A structured refusal, as required by CLAUDE.md §6.
+#[near(serializers = [json, borsh])]
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Refusal {
+    pub code: RefusalCode,
+    pub rule: String,
+    pub message: String,
+    /// The configured limit that was violated, where the rule has a numeric limit.
+    pub limit: Option<U128>,
+    /// The value actually observed, where the rule has a numeric limit.
+    pub observed: Option<U128>,
+}
+
+impl Refusal {
+    pub fn new(code: RefusalCode, message: String) -> Self {
+        Self {
+            code,
+            rule: code.rule().to_string(),
+            message,
+            limit: None,
+            observed: None,
+        }
+    }
+
+    pub fn with_numbers(code: RefusalCode, message: String, limit: u128, observed: u128) -> Self {
+        Self {
+            code,
+            rule: code.rule().to_string(),
+            message,
+            limit: Some(U128(limit)),
+            observed: Some(U128(observed)),
+        }
+    }
+}
+
+/// The validated, structured description of what an agent is asking to do.
+///
+/// The evaluator sees only this. Note what is absent: there is no calldata, no
+/// transaction preimage, no output list and no raw hash. That absence is the
+/// enforcement of CLAUDE.md §4 and invariants 5–8 — a caller has no field in
+/// which to smuggle an extra recipient or a different amount, because the
+/// transaction is later built by the contract from exactly these fields.
+#[derive(Clone, Debug)]
+pub struct TransferIntent {
+    pub chain: Chain,
+    /// Already normalised by the caller of the evaluator.
+    pub destination: String,
+    /// Transfer value in base units.
+    pub amount: u128,
+    /// The fee the transaction being signed will actually pay, in base units.
+    pub fee: u128,
+}
+
+/// A single recorded spend in the rolling window.
+#[near(serializers = [json, borsh])]
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SpendEntry {
+    pub at_ms: u64,
+    pub amount: U128,
+    pub request_id: u64,
+}
+
+/// Maximum spend entries retained per chain in the rolling ledger.
+///
+/// When the ledger is full of entries that are all still inside the window, the
+/// evaluator refuses with [`RefusalCode::BudgetLedgerFull`] rather than evicting
+/// an entry. Evicting would under-count spend and let the 24h cap be exceeded,
+/// so refusing is the conservative choice required by invariant 11.
+pub const MAX_SPEND_ENTRIES: usize = 64;
+
+/// Sums the spend entries that still fall inside the rolling window ending at `now_ms`.
+///
+/// Entries at exactly `now_ms - ROLLING_WINDOW_MS` have expired (the window is
+/// half-open), which is the boundary CLAUDE.md §10 requires to be tested.
+pub fn spend_in_window(entries: &[SpendEntry], now_ms: u64) -> u128 {
+    let cutoff = now_ms.saturating_sub(ROLLING_WINDOW_MS);
+    entries
+        .iter()
+        .filter(|e| e.at_ms > cutoff)
+        .fold(0u128, |acc, e| acc.saturating_add(e.amount.0))
+}
+
+/// Whether an entry has aged out of the window ending at `now_ms`.
+pub fn is_expired(entry: &SpendEntry, now_ms: u64) -> bool {
+    entry.at_ms <= now_ms.saturating_sub(ROLLING_WINDOW_MS)
+}
+
+/// The outcome of evaluating one intent against one policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Decision {
+    /// The request passed every rule. The carried value is the spend that must
+    /// be reserved against the rolling budget before any signing may begin.
+    Allow {
+        reserve: u128,
+    },
+    Refuse(Refusal),
+}
+
+/// Evaluates a transfer intent against an agent's policy.
+///
+/// **Evaluation order is fixed and deterministic** (CLAUDE.md §6). Cheap
+/// identity and state checks come first, then allowlists, then the time window,
+/// then numeric caps from narrowest to widest scope:
+///
+/// 1. agent enabled              → `agent_disabled`
+/// 2. chain allowlist            → `chain_not_allowed`
+/// 3. destination allowlist      → `destination_not_allowed`
+/// 4. time window                → `outside_time_window`
+/// 5. non-zero amount            → `amount_zero`
+/// 6. per-request cap            → `per_request_cap_exceeded`
+/// 7. fee cap                    → `fee_cap_exceeded`
+/// 8. rolling 24-hour cap        → `daily_cap_exceeded`
+///
+/// A request violating several rules always reports the first in this order, so
+/// that refusals are reproducible and an agent cannot learn a different limit by
+/// re-ordering its own request fields.
+///
+/// `enabled`, `policy`, `spend_entries` and the clock are all supplied by the
+/// caller, which keeps this function pure and directly unit-testable.
+pub fn evaluate(
+    enabled: bool,
+    policy: &Policy,
+    spend_entries: &[SpendEntry],
+    intent: &TransferIntent,
+    now_ms: u64,
+) -> Decision {
+    // 1. Kill switch.
+    if !enabled {
+        return Decision::Refuse(Refusal::new(
+            RefusalCode::AgentDisabled,
+            "agent is disabled by its owner".to_string(),
+        ));
+    }
+
+    // 2. Chain allowlist: the absence of a ChainPolicy is the denial.
+    let Some(cp) = policy.chain_policy(intent.chain) else {
+        return Decision::Refuse(Refusal::new(
+            RefusalCode::ChainNotAllowed,
+            format!(
+                "chain {} is not in this agent's policy",
+                intent.chain.as_str()
+            ),
+        ));
+    };
+
+    // 3. Destination allowlist.
+    if !cp
+        .allowed_destinations
+        .iter()
+        .any(|d| d == &intent.destination)
+    {
+        return Decision::Refuse(Refusal::new(
+            RefusalCode::DestinationNotAllowed,
+            format!(
+                "destination {} is not allowlisted for {}",
+                intent.destination,
+                intent.chain.as_str()
+            ),
+        ));
+    }
+
+    // 4. Time window, evaluated in UTC minutes of day.
+    if let Some(window) = policy.time_window {
+        let minute_of_day = ((now_ms / 60_000) % u64::from(MINUTES_PER_DAY)) as u32;
+        if !window.contains(minute_of_day) {
+            return Decision::Refuse(Refusal::new(
+                RefusalCode::OutsideTimeWindow,
+                format!(
+                    "current UTC minute {} is outside the permitted window {}..{}",
+                    minute_of_day, window.start_minute, window.end_minute
+                ),
+            ));
+        }
+    }
+
+    // 5. A zero-value transfer is never useful and would consume a request slot.
+    if intent.amount == 0 {
+        return Decision::Refuse(Refusal::new(
+            RefusalCode::AmountZero,
+            "transfer amount must be greater than zero".to_string(),
+        ));
+    }
+
+    // 6. Per-request cap. Boundary: amount == cap is allowed, cap + 1 is not.
+    if intent.amount > cp.max_per_request.0 {
+        return Decision::Refuse(Refusal::with_numbers(
+            RefusalCode::PerRequestCapExceeded,
+            format!(
+                "amount {} {} exceeds the per-request cap of {} {}",
+                intent.amount,
+                intent.chain.base_unit(),
+                cp.max_per_request.0,
+                intent.chain.base_unit()
+            ),
+            cp.max_per_request.0,
+            intent.amount,
+        ));
+    }
+
+    // 7. Fee cap, checked against the fee this transaction will actually pay
+    //    (invariant 9).
+    if intent.fee > cp.max_fee.0 {
+        return Decision::Refuse(Refusal::with_numbers(
+            RefusalCode::FeeCapExceeded,
+            format!(
+                "fee {} {} exceeds the fee cap of {} {}",
+                intent.fee,
+                intent.chain.base_unit(),
+                cp.max_fee.0,
+                intent.chain.base_unit()
+            ),
+            cp.max_fee.0,
+            intent.fee,
+        ));
+    }
+
+    // 8. Rolling 24-hour cap, counting every unexpired reservation.
+    let live: Vec<&SpendEntry> = spend_entries
+        .iter()
+        .filter(|e| !is_expired(e, now_ms))
+        .collect();
+    let already = spend_in_window(spend_entries, now_ms);
+    let projected = already.saturating_add(intent.amount);
+    if projected > cp.max_per_24h.0 {
+        return Decision::Refuse(Refusal::with_numbers(
+            RefusalCode::DailyCapExceeded,
+            format!(
+                "this transfer would bring 24h spend to {} {}, over the cap of {} {} ({} already \
+                 committed)",
+                projected,
+                intent.chain.base_unit(),
+                cp.max_per_24h.0,
+                intent.chain.base_unit(),
+                already
+            ),
+            cp.max_per_24h.0,
+            projected,
+        ));
+    }
+
+    // The request is allowed, but it can only be *recorded* if there is room in
+    // the bounded ledger. Refusing here is deliberate: silently dropping an old
+    // but still-live entry would under-count spend and break the 24h cap.
+    if live.len() >= MAX_SPEND_ENTRIES {
+        return Decision::Refuse(Refusal::new(
+            RefusalCode::BudgetLedgerFull,
+            format!(
+                "the rolling spend ledger already holds {MAX_SPEND_ENTRIES} live entries for this \
+                 chain; wait for older entries to age out of the 24h window"
+            ),
+        ));
+    }
+
+    Decision::Allow {
+        reserve: intent.amount,
+    }
+}
