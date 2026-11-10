@@ -29,7 +29,7 @@ This is early, honest-about-itself infrastructure. What exists today:
 | ✅ **Refusals before signing** | Destination, per-request cap and fee cap, each with a structured reason |
 | ✅ **MCP server** | 5 tools over stdio, driven against the deployed contract |
 | ✅ **Agent demo** | [`evals/transcript.md`](evals/transcript.md) — payment, refusals, revocation, audit trail |
-| ✅ **ERC-20 transfers** | Calldata composed in-contract, matches **viem** exactly; signed on testnet |
+| ✅ **ERC-20 transfers** | Calldata composed in-contract; [1 USDC transfer confirmed](https://sepolia.basescan.org/tx/0xef8d64d2c6af908d848053822c6a5fee6d106ada406afcf333d6c9933721ea46) in block 56963072 |
 | ✅ **Bitcoin testnet4** | BIP143 sighash matches **bitcoinjs-lib**; signed on testnet and verified |
 | ✅ **Owner-wide budgets** | A keyring-wide cap across all agents, enforced on testnet |
 | ✅ **Bitcoin spend on testnet4** | [Confirmed in block 160377](https://mempool.space/testnet4/tx/15061f1f6bb2fd892018621bb8523dff7ddef6bf0d672f01b56441eb225aaeee) — 50,000 sat paid, change returned, 500 sat fee |
@@ -248,7 +248,7 @@ it to be manipulated into calling.
 | | |
 |---|---|
 | Base Sepolia — native ETH | Built, verified against viem, **payment landed on chain** |
-| Base Sepolia — ERC-20 | Built, verified against viem, signed on testnet |
+| Base Sepolia — ERC-20 | Built, verified against viem, **transfer confirmed on chain** |
 | Bitcoin testnet4 — P2WPKH | Built, verified against bitcoinjs-lib, **spend confirmed in a block** |
 
 Bitcoin is one input, native segwit, one payment plus change to the Keyring's
@@ -274,24 +274,20 @@ Read `docs/threat-model.md` for the full list. The ones that matter most:
    the owner sets a keyring-wide cap, N agents each capped at C still expose
    the owner to N x C — a policy reading "2 ETH per 24h" limits that *agent*.
    `set_aggregate_budget` bounds the total; nothing sets it by default.
-3. **No ERC-20 transfer has been broadcast.** The transaction is constructed,
-   signed and verified against viem, but the derived address holds no test
-   tokens, so none has been sent. Native ETH and Bitcoin spends have both
-   been confirmed in blocks on their networks.
-4. **Bitcoin is one input, native segwit only.** Multiple inputs are not
+3. **Bitcoin is one input, native segwit only.** Multiple inputs are not
    supported rather than half-supported, and bech32m (Taproot) destinations are
    refused.
-5. **Replay protection is bounded** at 32 idempotency keys per agent. The uncaught
+4. **Replay protection is bounded** at 32 idempotency keys per agent. The uncaught
    case is a second within-policy payment, never an over-limit one.
-6. **A failed broadcast still consumes budget** until the window rolls. Deliberate:
+5. **A failed broadcast still consumes budget** until the window rolls. Deliberate:
    refunding on a relayer's report would let a hostile relayer mint spend capacity.
-7. **Transaction construction is proven by tests** against viem and
+6. **Transaction construction is proven by tests** against viem and
    bitcoinjs-lib, rather than resting on the absence of a dangerous parameter.
-8. **A failed signing keeps its budget reservation.** The contract cannot prove
+7. **A failed signing keeps its budget reservation.** The contract cannot prove
    the MPC network never assembled a signature, so releasing budget could
    authorise the same spend twice. A failed signing therefore consumes budget
    until the window rolls.
-9. **The MPC wire types are mirrored, not imported.** The official
+8. **The MPC wire types are mirrored, not imported.** The official
    `near-mpc-sdk` 0.0.1 does not compile against near-sdk 5.30.1. The schemas
    were read from the deployed signer's own ABI and are pinned by tests, but
    must be re-checked when the signer is upgraded.

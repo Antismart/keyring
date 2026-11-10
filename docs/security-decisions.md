@@ -592,3 +592,45 @@ The chain's own record confirms the outputs are exactly what policy approved:
 the payment to the allowlisted destination and change back to the Keyring's own
 derived address, with no third output. The Keyring address holds the 153,354
 sat of change, so the contract can spend from it again.
+
+## 32. ERC-20 end to end, verified on Base Sepolia
+
+**A token transfer built by the contract was confirmed on chain.**
+
+| | |
+|---|---|
+| Transaction | `0xef8d64d2c6af908d848053822c6a5fee6d106ada406afcf333d6c9933721ea46` |
+| Block | 56963072, status success, 45,059 gas |
+| Token | `0x036cbd53842c5426634e7929541ec2318f3dcf7e` (Base Sepolia USDC) |
+| Amount | 1,000,000 base units (1 USDC), the per-request cap |
+| Fee | within the derived ceiling of 780,000,065,000 wei |
+
+The token contract emitted `Transfer(1000000)` from the Keyring address to the
+allowlisted destination, and the Keyring's balance fell from 20 to 19 USDC. A
+transaction that succeeds is not the same as a transfer that happened — an
+ERC-20 call can succeed while transferring nothing — so the balance change and
+the event are what establish the result.
+
+Invariant 7 is now demonstrated rather than merely structural: the calldata the
+network executed was composed by the contract from the policy-approved token,
+recipient and amount.
+
+## 33. A bug in the relayer's own verification, found by broadcasting
+
+**Fixed.** `verifySignedTransaction` compared `parsed.value` against the
+expected value directly. viem omits `value` from a parsed transaction when it
+is zero — which is *every* token transfer — so the comparison read
+`undefined !== 0n` and aborted the broadcast.
+
+The check behaved correctly in the sense that it refused to send rather than
+sending something unverified. But it was wrong, and it would have blocked every
+ERC-20 broadcast. It was caught by attempting a real transfer, not by the test
+suite: the existing tests covered tampering being detected and the native happy
+path, but not the token happy path through `verifySignedTransaction`.
+
+Two regression tests were added: an untampered token transfer must verify, and
+a transaction whose value genuinely disagrees must still be caught, so the
+zero-value allowance does not weaken the check.
+
+Worth recording as a reminder that a strict check passing its own tests is not
+evidence it is correct for cases those tests do not reach.
