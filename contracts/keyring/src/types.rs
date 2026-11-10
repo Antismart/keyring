@@ -6,6 +6,7 @@
 //! cross-chain conversion: a limit expressed for one chain is never compared
 //! against an amount on another.
 
+use crate::evm::EvmParams;
 use near_sdk::near;
 
 /// A chain Keyring can be asked to sign for.
@@ -89,6 +90,37 @@ pub fn normalize_destination(chain: Chain, raw: &str) -> Option<String> {
             } else {
                 Some(raw.to_string())
             }
+        }
+    }
+}
+
+/// Chain-specific transaction parameters supplied with a transfer request.
+///
+/// These are the inputs the contract needs to build a real transaction that
+/// are not themselves policy decisions: nonces, gas prices, and later UTXOs.
+/// They come from the semi-trusted SDK/relayer.
+///
+/// Note what is **not** here: no recipient, no amount, no calldata, no
+/// preimage. Those come from the request's validated fields or from policy, so
+/// nothing in this type can redirect a payment or change its size. Wrong values
+/// here cause a transaction that fails or overpays within the fee cap
+/// (threat T6).
+#[near(serializers = [json, borsh])]
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ChainParams {
+    Evm(EvmParams),
+}
+
+impl ChainParams {
+    /// Whether these parameters are the right kind for `chain`.
+    pub fn matches(&self, chain: Chain) -> bool {
+        matches!((self, chain), (ChainParams::Evm(_), Chain::BaseSepolia))
+    }
+
+    pub fn as_evm(&self) -> Option<&EvmParams> {
+        match self {
+            ChainParams::Evm(p) => Some(p),
         }
     }
 }

@@ -44,6 +44,7 @@
 //! construction test. Gate D/E must close that gap.
 
 pub mod events;
+pub mod evm;
 pub mod mpc;
 pub mod policy;
 pub mod signer;
@@ -61,7 +62,7 @@ use signer::SignerBackend;
 use state::{
     Agent, Keyring, RequestStatus, StoredSignature, TransferRequest, MAX_AGENTS_PER_KEYRING,
 };
-use types::{normalize_destination, Chain, MAX_IDEMPOTENCY_KEY_LEN, MAX_LABEL_LEN};
+use types::{normalize_destination, Chain, ChainParams, MAX_IDEMPOTENCY_KEY_LEN, MAX_LABEL_LEN};
 
 /// What a caller gets back from `request_transfer`.
 ///
@@ -284,13 +285,33 @@ impl Contract {
         chain: Chain,
         destination: String,
         amount: U128,
-        fee: U128,
+        params: ChainParams,
         idempotency_key: String,
     ) -> PromiseOrValue<RequestOutcome> {
         require!(
             idempotency_key.len() <= MAX_IDEMPOTENCY_KEY_LEN && !idempotency_key.is_empty(),
             "idempotency_key must be 1..=64 characters"
         );
+
+        require!(
+            params.matches(chain),
+            "transaction parameters do not match the requested chain"
+        );
+        // Bitcoin construction is Gate E. Refusing here is deliberate: signing
+        // anything other than a real transaction for a chain the caller asked
+        // for would be worse than refusing outright.
+        require!(
+            chain == Chain::BaseSepolia,
+            "transaction construction for this chain is not implemented"
+        );
+
+        // The fee is DERIVED from the same gas numbers that enter the signed
+        // transaction, never taken from the caller (invariant 9).
+        let evm = params.as_evm().expect("checked above");
+        if let Err(e) = evm.validate() {
+            env::panic_str(&format!("invalid transaction parameters: {}", e.message()));
+        }
+        let fee = U128(evm.max_fee_wei().expect("validated above"));
 
         let agent_pk = env::signer_account_pk();
         let owner = self
@@ -376,6 +397,7 @@ impl Contract {
             destination: stored_destination.clone(),
             amount,
             fee,
+            params: params.clone(),
             status: status.clone(),
             reserved: U128(reserved),
             idempotency_key,
@@ -422,16 +444,22 @@ impl Contract {
         );
         events::request_status_changed(request_id, &status);
 
-        // The payload is derived here, from fields policy has already approved.
-        // The caller contributed no bytes to it.
-        let payload = signer::gate_c_commitment(
-            &env::current_account_id(),
-            request_id,
-            chain.as_str(),
-            &stored_destination,
-            amount.0,
-            fee.0,
-        );
+        // The transaction is built here, from fields policy has already
+        // approved. The caller contributed no bytes to the preimage: the
+        // recipient and value come from the validated request, and the gas
+        // numbers are the ones the fee cap was just checked against.
+        let to = evm::address_bytes(&stored_destination)
+            .unwrap_or_else(|| env::panic_str("validated destination is not a 20-byte address"));
+        let tx = evm::Eip1559Transfer {
+            chain_id: evm::BASE_SEPOLIA_CHAIN_ID,
+            nonce: evm.nonce.0,
+            max_priority_fee_per_gas: evm.max_priority_fee_per_gas.0,
+            max_fee_per_gas: evm.max_fee_per_gas.0,
+            gas_limit: evm.gas_limit.0,
+            to,
+            value: amount.0,
+        };
+        let payload = tx.signing_hash();
         let payload_hex = mpc::to_hex(&payload);
         let path = signer::derivation_path(&owner, &agent_label, chain.as_str());
 
@@ -561,9 +589,22 @@ impl Contract {
         chain: Chain,
         destination: String,
         amount: U128,
-        fee: U128,
+        params: ChainParams,
     ) -> SimulationResult {
         let now = env::block_timestamp_ms();
+
+        // Mirrors the real path exactly. A simulation that assumed a different
+        // fee than a request would compute would be worse than no simulation.
+        require!(
+            params.matches(chain),
+            "transaction parameters do not match the requested chain"
+        );
+        let evm = params.as_evm().expect("checked above");
+        if let Err(e) = evm.validate() {
+            env::panic_str(&format!("invalid transaction parameters: {}", e.message()));
+        }
+        let fee = U128(evm.max_fee_wei().expect("validated above"));
+
         let keyring = self
             .keyrings
             .get(&owner)

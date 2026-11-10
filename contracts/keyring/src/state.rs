@@ -1,7 +1,7 @@
 //! Persistent contract state: keyrings, agents and the request lifecycle.
 
 use crate::policy::{Policy, Refusal, SpendEntry};
-use crate::types::Chain;
+use crate::types::{Chain, ChainParams};
 use near_sdk::json_types::U128;
 use near_sdk::{near, AccountId, PublicKey};
 
@@ -240,7 +240,17 @@ pub struct TransferRequest {
     /// Normalised destination address.
     pub destination: String,
     pub amount: U128,
+    /// The maximum fee the signed transaction can pay, in base units.
+    ///
+    /// **Derived, never supplied.** For EVM this is
+    /// `gas_limit * max_fee_per_gas` computed from [`TransferRequest::params`],
+    /// so the value policy checked and the value the transaction can actually
+    /// spend are the same number (invariant 9).
     pub fee: U128,
+    /// The chain-specific inputs used to build the transaction.
+    ///
+    /// Recorded so the signed transaction can be reassembled and audited.
+    pub params: ChainParams,
     pub status: RequestStatus,
     /// Budget reserved for this request, in base units. Zero when refused.
     pub reserved: U128,
