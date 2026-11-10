@@ -1,0 +1,175 @@
+/**
+ * Types mirroring the Keyring contract's public interface.
+ *
+ * Every type here corresponds to a Rust type in `contracts/keyring/src`. The
+ * contract is authoritative: these definitions exist so callers get type safety
+ * and autocompletion, never so the SDK can make a policy decision of its own.
+ *
+ * ## Money
+ *
+ * All amounts are integer strings in the smallest base unit of their chain —
+ * wei for Base Sepolia, satoshi for Bitcoin testnet4. They are strings because
+ * a u128 does not fit in a JavaScript `number`, and because the contract
+ * serialises `U128` as a JSON string. Never parse these with `Number()`; use
+ * `BigInt()` if you need arithmetic.
+ */
+
+/** An integer amount in base units, as a decimal string. */
+export type BaseUnits = string;
+
+/** Chains Keyring can sign for. Mirrors the Rust `Chain` enum. */
+export type Chain = "base_sepolia" | "bitcoin_testnet4";
+
+/** A NEAR public key in `ed25519:<base58>` or `secp256k1:<base58>` form. */
+export type PublicKeyString = string;
+
+/** A NEAR account id. */
+export type AccountId = string;
+
+/**
+ * A UTC time-of-day window, in minutes from midnight, half-open
+ * `[startMinute, endMinute)`. When `startMinute > endMinute` the window wraps
+ * midnight.
+ */
+export interface TimeWindow {
+  start_minute: number;
+  end_minute: number;
+}
+
+/** Per-chain limits. The presence of an entry is itself the chain allowlist. */
+export interface ChainPolicy {
+  chain: Chain;
+  max_per_request: BaseUnits;
+  max_per_24h: BaseUnits;
+  max_fee: BaseUnits;
+  /** Allowlisted destinations. An empty array permits nobody, never anybody. */
+  allowed_destinations: string[];
+}
+
+/** A complete agent policy. */
+export interface Policy {
+  chains: ChainPolicy[];
+  time_window: TimeWindow | null;
+}
+
+/**
+ * Stable machine-readable refusal codes.
+ *
+ * These are a committed part of the API surface: branch on them rather than on
+ * the human-readable message, which may be reworded.
+ */
+export type RefusalCode =
+  | "agent_not_registered"
+  | "agent_disabled"
+  | "chain_not_allowed"
+  | "malformed_destination"
+  | "destination_not_allowed"
+  | "outside_time_window"
+  | "amount_zero"
+  | "per_request_cap_exceeded"
+  | "fee_cap_exceeded"
+  | "daily_cap_exceeded"
+  | "budget_ledger_full"
+  | "duplicate_request";
+
+/** A structured policy refusal. */
+export interface Refusal {
+  code: RefusalCode;
+  /** The rule family this refusal came from, e.g. `rolling_24h_cap`. */
+  rule: string;
+  message: string;
+  /** The configured limit, for rules that have a numeric limit. */
+  limit: BaseUnits | null;
+  /** The value observed, for rules that have a numeric limit. */
+  observed: BaseUnits | null;
+}
+
+/** Lifecycle state of a transfer request. */
+export type RequestStatus = "created" | "refused" | "signing" | "signed" | "failed";
+
+/** One recorded reservation against the rolling budget. */
+export interface SpendEntry {
+  at_ms: number;
+  amount: BaseUnits;
+  request_id: number;
+}
+
+export interface ChainLedger {
+  chain: Chain;
+  entries: SpendEntry[];
+}
+
+/** A registered agent. */
+export interface Agent {
+  public_key: PublicKeyString;
+  label: string;
+  enabled: boolean;
+  policy: Policy;
+  ledgers: ChainLedger[];
+  created_at_ms: number;
+  requests_made: number;
+  recent_keys: { key: string; request_id: number }[];
+}
+
+/** An owner's Keyring. */
+export interface Keyring {
+  owner: AccountId;
+  created_at_ms: number;
+  agents: Agent[];
+  history: number[];
+}
+
+/** A transfer request and its audit record. */
+export interface TransferRequest {
+  id: number;
+  owner: AccountId;
+  agent_public_key: PublicKeyString;
+  chain: Chain;
+  destination: string;
+  amount: BaseUnits;
+  fee: BaseUnits;
+  status: RequestStatus;
+  reserved: BaseUnits;
+  idempotency_key: string;
+  created_at_ms: number;
+  updated_at_ms: number;
+  refusal: Refusal | null;
+}
+
+/**
+ * The result of `request_transfer`.
+ *
+ * A refusal arrives here as a normal successful response, not a thrown error.
+ * Callers must discriminate on `outcome`; treating any resolved promise as
+ * success would misreport a refused payment as a completed one.
+ */
+export type RequestOutcome =
+  | { outcome: "created"; request_id: number; reserved: BaseUnits }
+  | { outcome: "refused"; request_id: number; refusal: Refusal }
+  | { outcome: "duplicate"; request_id: number };
+
+/** The result of the `simulate_transfer` view. */
+export interface SimulationResult {
+  allowed: boolean;
+  refusal: Refusal | null;
+  would_reserve: BaseUnits | null;
+  spent_24h: BaseUnits;
+  cap_24h: BaseUnits | null;
+}
+
+/** Which signing backend a deployment uses. */
+export type SignerBackend = { mpc: { contract_id: AccountId } } | "mock";
+
+/** Narrows a {@link RequestOutcome} to the created case. */
+export function isCreated(
+  o: RequestOutcome,
+): o is { outcome: "created"; request_id: number; reserved: BaseUnits } {
+  return o.outcome === "created";
+}
+
+/** Narrows a {@link RequestOutcome} to the refused case. */
+export function isRefused(
+  o: RequestOutcome,
+): o is { outcome: "refused"; request_id: number; refusal: Refusal } {
+  return o.outcome === "refused";
+}
