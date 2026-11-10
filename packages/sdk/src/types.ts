@@ -84,6 +84,25 @@ export interface Refusal {
   observed: BaseUnits | null;
 }
 
+/**
+ * A signature recorded against a request.
+ *
+ * `mock` is stored data, not a deployment flag, so a mock signature can never
+ * be mistaken for a real one by anything reading a request. Check it before
+ * describing a result as a real signature.
+ */
+export interface StoredSignature {
+  /** Always `Secp256k1` for the chains Keyring supports. */
+  scheme: string;
+  /** Hex-encoded curve point. */
+  big_r: string;
+  /** Hex-encoded scalar. */
+  s: string;
+  recovery_id: number;
+  /** True when produced by the mock backend. Never a valid signature. */
+  mock: boolean;
+}
+
 /** Lifecycle state of a transfer request. */
 export type RequestStatus = "created" | "refused" | "signing" | "signed" | "failed";
 
@@ -134,6 +153,22 @@ export interface TransferRequest {
   created_at_ms: number;
   updated_at_ms: number;
   refusal: Refusal | null;
+  /**
+   * Present when `status` is `signed`.
+   *
+   * A signature does not mean the destination-chain transaction was broadcast
+   * or confirmed, and the budget reservation is never released on it.
+   */
+  signature: StoredSignature | null;
+  /** Present when `status` is `failed`. */
+  failure_reason: string | null;
+  /**
+   * The exact payload sent to the MPC signer, hex-encoded.
+   *
+   * Recorded so the signed value can be independently recomputed from the
+   * fields policy approved.
+   */
+  payload_hex: string | null;
 }
 
 /**
@@ -146,7 +181,9 @@ export interface TransferRequest {
 export type RequestOutcome =
   | { outcome: "created"; request_id: number; reserved: BaseUnits }
   | { outcome: "refused"; request_id: number; refusal: Refusal }
-  | { outcome: "duplicate"; request_id: number };
+  | { outcome: "duplicate"; request_id: number }
+  | { outcome: "signed"; request_id: number }
+  | { outcome: "signing_failed"; request_id: number; reason: string };
 
 /** The result of the `simulate_transfer` view. */
 export interface SimulationResult {
@@ -159,6 +196,24 @@ export interface SimulationResult {
 
 /** Which signing backend a deployment uses. */
 export type SignerBackend = { mpc: { contract_id: AccountId } } | "mock";
+
+/**
+ * Whether an outcome means the request passed policy.
+ *
+ * Both `created` and `signed` indicate the policy allowed it: `signed` comes
+ * back when signing completed within the same call, `created` when it has not
+ * been attempted yet. Neither means the payment reached its destination chain.
+ */
+export function isPermitted(o: RequestOutcome): boolean {
+  return o.outcome === "created" || o.outcome === "signed";
+}
+
+/** Narrows a {@link RequestOutcome} to the signed case. */
+export function isSigned(
+  o: RequestOutcome,
+): o is { outcome: "signed"; request_id: number } {
+  return o.outcome === "signed";
+}
 
 /** Narrows a {@link RequestOutcome} to the created case. */
 export function isCreated(

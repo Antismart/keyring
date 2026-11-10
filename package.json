@@ -16,9 +16,12 @@
     "contract:check": "cargo clippy --target wasm32-unknown-unknown -- -D warnings",
     "contract:test": "cargo test",
     "contract:build": "cd contracts/keyring && cargo near build non-reproducible-wasm",
-    "contract:abi": "cd contracts/keyring && cargo near abi"
+    "contract:abi": "cd contracts/keyring && cargo near abi",
+    "verify:signature": "node scripts/verify-signature.mjs"
   },
   "devDependencies": {
+    "@noble/curves": "1.9.7",
+    "@scure/base": "1.2.6",
     "typescript": "5.9.3"
   }
 }
