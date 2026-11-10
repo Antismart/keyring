@@ -12,7 +12,7 @@ via NEAR Chain Signatures (MPC).
 
 ---
 
-## Status: Gate D of F — a real payment on Base Sepolia
+## Status: Gate F — the full agent workflow runs end to end
 
 This is early, honest-about-itself infrastructure. What exists today:
 
@@ -27,6 +27,8 @@ This is early, honest-about-itself infrastructure. What exists today:
 | ✅ **Typed SDK + MCP surface** | 28 TypeScript tests |
 | ✅ **Payment on Base Sepolia** | [Included in block 56892318](https://sepolia.basescan.org/tx/0x03f49320c7aa0dcd2126f2a1ab247e0025b1aef8fa23955ab6bfc4d9bce43014), 21000 gas, status success |
 | ✅ **Refusals before signing** | Destination, per-request cap and fee cap, each with a structured reason |
+| ✅ **MCP server** | 5 tools over stdio, driven against the deployed contract |
+| ✅ **Agent demo** | [`evals/transcript.md`](evals/transcript.md) — payment, refusals, revocation, audit trail |
 | ⬜ **Bitcoin** | Not implemented. |
 | ⬜ **ERC-20 transfers** | Not implemented — the transaction has no calldata field at all. |
 
@@ -169,12 +171,66 @@ payable and an agent cannot influence it.
 ## MCP tools
 
 Exactly five, and the omissions are deliberate: there is no tool to register an
-agent, change a policy, enable an agent or sign arbitrary data. A tool the agent
-runtime cannot call is the only kind it cannot be tricked into calling. A test
-asserts the exposed set.
+agent, change a policy, enable an agent, revoke an agent or sign arbitrary data.
+A tool the agent runtime cannot call is the only kind it cannot be tricked into
+calling. A test asserts the exposed set, so widening it is a visible change.
 
-`get_addresses` · `get_policy` · `simulate_transfer` · `request_transfer` ·
-`get_history`
+| Tool | |
+|---|---|
+| `get_addresses` | Derivation path and the derived address Keyring pays from |
+| `get_policy` | Caps, allowlists, time window, enabled state |
+| `simulate_transfer` | Would this be allowed, and if not which rule refuses it |
+| `request_transfer` | Request a payment within policy |
+| `get_history` | Past requests with the reason for every refusal |
+
+Four are read-only. `request_transfer` is registered **only** when an agent key
+is configured, so a read-only deployment does not advertise a spending tool at
+all.
+
+### Running it
+
+```bash
+pnpm install && pnpm -r build
+
+export KEYRING_CONTRACT_ID=keyring-gated-1794298589.testnet
+export KEYRING_OWNER_ID=$KEYRING_CONTRACT_ID
+export AGENT_ACCOUNT_ID=<agent account>   # omit to run read-only
+export AGENT_PRIVATE_KEY=<agent key>
+node packages/mcp-server/dist/bin.js
+```
+
+Add it to an MCP client with:
+
+```json
+{
+  "mcpServers": {
+    "keyring": {
+      "command": "node",
+      "args": ["/absolute/path/to/keyring/packages/mcp-server/dist/bin.js"],
+      "env": {
+        "KEYRING_CONTRACT_ID": "keyring-gated-1794298589.testnet",
+        "AGENT_ACCOUNT_ID": "...",
+        "AGENT_PRIVATE_KEY": "..."
+      }
+    }
+  }
+}
+```
+
+## The demo
+
+[`evals/transcript.md`](evals/transcript.md) is a real run: an agent discovers
+its limits, simulates, makes a payment that lands on Base Sepolia, is refused
+three different ways, gets revoked by its owner, and then cannot transact.
+
+```bash
+node scripts/demo-agent.mjs      # regenerates the transcript
+```
+
+The step worth looking at is the revocation. It happens through the SDK with the
+owner's key, because there is no MCP tool for it — the agent cannot revoke
+itself, re-enable itself or change its own caps, since no such tool exists for
+it to be manipulated into calling.
 
 ## Known limitations
 

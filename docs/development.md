@@ -86,7 +86,7 @@ credentials and no network.
 | D — Base Sepolia e2e | **Met.** EIP-1559 built in-contract and matched against viem, signed by the live MPC network, included in block 56892318. Destination, per-request and fee-cap refusals all returned before signing. |
 | E — Bitcoin e2e | Not started. Blocked on the fee-cap/UTXO issue in `security-decisions.md` section 8. |
 | ERC-20 | Not implemented; the transaction struct has no calldata field (decision 21). |
-| F — agent workflow | Not started. |
+| F — agent workflow | **Met.** MCP server implemented over stdio and driven against the deployed contract; `evals/transcript.md` records a real payment, three refusals, owner revocation and the audit trail. |
 
 ## Testnet verification
 
@@ -125,6 +125,23 @@ near contract deploy YOUR.testnet \
 
 A `request_transfer` call must attach about 300 TGas: the contract forwards
 100 TGas to the signer and reserves 20 TGas for its own callback.
+
+## MCP server
+
+```bash
+pnpm -r build
+KEYRING_CONTRACT_ID=keyring-gated-1794298589.testnet \
+AGENT_ACCOUNT_ID=<agent> AGENT_PRIVATE_KEY=<key> \
+node packages/mcp-server/dist/bin.js
+```
+
+Without `AGENT_ACCOUNT_ID` and `AGENT_PRIVATE_KEY` the server starts read-only
+and does not register `request_transfer` at all. With
+`KEYRING_AUTO_BROADCAST=true` a signed transfer is broadcast immediately;
+otherwise the signature is returned for `scripts/broadcast-evm.mjs`.
+
+Regenerate the demo transcript with `node scripts/demo-agent.mjs` (see
+`evals/README.md` for the variables it needs).
 
 ## Base Sepolia
 
