@@ -315,3 +315,69 @@ Three parts of the current design need attention:
 Concurrency is not a concern: NEAR executes calls to one contract account
 sequentially, so an owner-level counter would be as race-free as the per-agent
 ledger is today (threat T4).
+
+## 20. The fee is derived from gas parameters, never supplied by the caller
+
+**Settled, and it fixes an unsound earlier design.** Up to Gate C,
+`request_transfer` took a `fee` argument that policy checked against the fee
+cap. That was wrong in a way worth stating plainly: the number policy checked
+and the number the transaction could actually spend were two different values,
+and the caller controlled both.
+
+An EIP-1559 transaction's maximum cost is `gas_limit * max_fee_per_gas`. A
+caller could have declared `fee: 1` to pass the cap while supplying gas
+parameters authorising far more, and the contract would have signed it.
+
+The `fee` parameter is gone. The caller now supplies only the gas parameters
+that must go into the transaction anyway, and the contract computes
+`EvmParams::max_fee_wei()` from exactly those numbers. The value policy checks
+and the value the signed transaction can spend are now the same number by
+construction, which is what invariant 9 actually asks for.
+
+The ceiling, not the expected cost, is what gets checked. Actual cost is
+`gas_used * effective_gas_price`, which is never higher, so a signed
+transaction can never cost more than the cap permitted regardless of network
+conditions.
+
+Gas limits are bounded to `[21000, 200000]`. Keyring builds only plain value
+transfers, which cost exactly 21000, so a larger limit cannot buy anything — it
+can only raise the fee ceiling. The upper bound is generous rather than pinned
+at 21000 so that a caller padding slightly is not refused.
+
+## 21. ERC-20 transfers are not implemented
+
+**Settled for now.** `Eip1559Transfer` has no `data` field. The transaction
+encoder always writes empty calldata, so there is no way to attach any.
+
+Invariant 7 requires token transfer calldata to be composed by the contract
+from a validated token address, recipient and amount. Rather than implement
+that under time pressure and risk getting it subtly wrong, token transfers are
+simply absent: the invariant is vacuous because the capability does not exist.
+A test asserts the encoded transaction ends with empty data and an empty access
+list, so adding calldata would be a deliberate, visible change.
+
+## 22. Gate D verification, and what remains unproven
+
+**The transaction path is verified; the broadcast is not.**
+
+Verified:
+
+- The contract's EIP-1559 encoding matches viem byte for byte across five
+  fixtures, including RLP's awkward cases: zero (which must encode as the empty
+  string, not `0x00`), the `0x7f`/`0x80` single-byte boundary, and a payload
+  long enough to require the >55-byte list header.
+- The MPC signature over that hash recovers to the Keyring address the signer
+  derives for the agent, confirming the transaction is signed by the key policy
+  governs.
+- Base Sepolia's own node parsed the transaction, recovered its sender and
+  checked that sender's balance. A malformed or badly signed transaction is
+  rejected before a balance lookup, so reaching `insufficient funds` is itself
+  evidence the transaction is well formed and correctly signed.
+
+Not verified: the transaction has **not** been included in a block. The derived
+address `0xbd0748719c9defaff838e0a810a00b0eb563cc53` holds no ETH, and
+Base Sepolia faucets require interactive verification. The signature is valid
+and does not need regenerating; `scripts/broadcast-evm.mjs` re-runs the checks
+and sends it once the address is funded.
+
+Deployment used: `keyring-gated-1794298589.testnet`.

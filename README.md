@@ -12,7 +12,7 @@ via NEAR Chain Signatures (MPC).
 
 ---
 
-## Status: Gate C of F
+## Status: Gate D (transaction path verified, broadcast pending funding)
 
 This is early, honest-about-itself infrastructure. What exists today:
 
@@ -22,14 +22,20 @@ This is early, honest-about-itself infrastructure. What exists today:
 | ✅ **Access control** | Owner-only mutation, key-based agent identity, 28 tests |
 | ✅ **Real MPC signing** | Deployed to NEAR testnet; a real signature from `v1.signer-prod.testnet`, independently verified |
 | ✅ **Signing lifecycle** | `Created → Signing → Signed \| Failed`, private callback, 14 tests |
-| ✅ **Typed SDK + MCP surface** | 15 TypeScript tests |
-| ⬜ **EVM / Bitcoin transactions** | **Not implemented.** Gate C signs a domain-separated commitment to the approved fields, *not* a broadcastable transaction. |
-| ⬜ **Broadcast to any chain** | Not implemented. |
+| ✅ **EIP-1559 construction** | Built in-contract, matches **viem** byte for byte across 5 fixtures |
+| ✅ **Signature → address** | The MPC signature recovers to the derived Keyring address |
+| ✅ **Typed SDK + MCP surface** | 28 TypeScript tests |
+| ⚠️ **Broadcast on Base Sepolia** | Transaction is valid and accepted by the node, but the derived address is **unfunded**, so nothing has been included in a block yet. |
+| ⬜ **Bitcoin** | Not implemented. |
+| ⬜ **ERC-20 transfers** | Not implemented — the transaction has no calldata field at all. |
 
-**Nothing here has been audited or used to move value of any kind.** 87 tests
-pass, and real signing is verified on testnet — but no Ethereum or Bitcoin
-transaction has yet been constructed, so Keyring cannot currently make a
-payment on any chain. That is Gate D.
+**Nothing here has been audited or used to move value of any kind.** 119 tests
+pass. Keyring now builds a real Base Sepolia transaction and gets it signed by
+the live MPC network, and the resulting transaction is well formed enough that
+Base Sepolia's own node parses it, recovers the sender and checks that address's
+balance. But the derived address holds no ETH, so **no transaction has yet been
+included in a block.** Fund `0xbd0748719c9defaff838e0a810a00b0eb563cc53` on
+Base Sepolia and `scripts/broadcast-evm.mjs` will send it.
 
 A mock signature is never presented as a real one: `StoredSignature.mock` is
 persisted on every request, so the distinction survives into any dashboard,
@@ -84,7 +90,8 @@ point):
 - **Rolling 24-hour cap** — reserved at authorisation, checked against the
   projected total
 - **Time window** — UTC minutes of day, including windows that wrap midnight
-- **Fee cap**
+- **Fee cap** — checked against `gas_limit * max_fee_per_gas`, which the
+  contract derives. There is no caller-supplied fee field.
 
 Evaluation order is fixed, so a request breaking several rules always reports the
 same one. Refusals are structured — code, rule, human-readable message,
@@ -142,7 +149,7 @@ parameter:
 
 | Method | |
 |---|---|
-| `request_transfer(chain, destination, amount, fee, idempotency_key)` | Returns `Signed`, `Refused`, `Duplicate` or `SigningFailed` |
+| `request_transfer(chain, destination, amount, params, idempotency_key)` | Returns `Signed`, `Refused`, `Duplicate` or `SigningFailed` |
 | `on_signed(...)` | Private callback. Rejects any predecessor but the contract itself. |
 
 Attach about 300 TGas to `request_transfer`: the contract forwards 100 TGas to

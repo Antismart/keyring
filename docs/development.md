@@ -83,8 +83,9 @@ credentials and no network.
 | A — foundation | **Met.** Builds, lint clean, interfaces documented, mock signer available. |
 | B — policy correctness | **Met.** 72 Rust tests: every rule at both sides of its boundary, access control, aggregate budget, MPC success and failure paths. Partial signing does not apply to the single-payload secp256k1 flow. |
 | C — real NEAR signing | **Met.** Deployed to testnet, real signature from the live signer, callback lifecycle tested, signature independently verified, no direct agent-to-MPC path. |
-| D — Base Sepolia e2e | Not started. Needs EIP-1559 construction in the contract plus a viem cross-check. |
+| D — Base Sepolia e2e | **Mostly met.** EIP-1559 built in-contract and matched against viem; signature recovers to the derived address; node accepts the transaction. **Outstanding:** the derived address is unfunded, so no transaction is in a block yet. |
 | E — Bitcoin e2e | Not started. Blocked on the fee-cap/UTXO issue in `security-decisions.md` section 8. |
+| ERC-20 | Not implemented; the transaction struct has no calldata field (decision 21). |
 | F — agent workflow | Not started. |
 
 ## Testnet verification
@@ -124,3 +125,24 @@ near contract deploy YOUR.testnet \
 
 A `request_transfer` call must attach about 300 TGas: the contract forwards
 100 TGas to the signer and reserves 20 TGas for its own callback.
+
+## Base Sepolia
+
+| | |
+|---|---|
+| Keyring contract | `keyring-gated-1794298589.testnet` |
+| Derived address | `0xbd0748719c9defaff838e0a810a00b0eb563cc53` |
+| Chain id | 84532 (confirmed via `eth_chainId`) |
+
+```bash
+# Regenerate the viem reference fixtures, or check them without writing
+node scripts/gen-evm-fixtures.mjs
+node scripts/gen-evm-fixtures.mjs --check
+
+# Assemble and broadcast a signed request
+node scripts/broadcast-evm.mjs keyring-gated-1794298589.testnet 1
+```
+
+The broadcast script refuses to send unless the recomputed signing hash matches
+the contract's record, the assembled transaction still carries the approved
+recipient and value, and the signature recovers to the derived Keyring address.

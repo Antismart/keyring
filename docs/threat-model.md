@@ -128,15 +128,23 @@ client cannot lose precision on the way in (security decision 12).
 
 ### T7 — A caller smuggles extra recipients or calldata into the signed payload
 
-**Mitigated by interface design, verification deferred to Gate D/E.** No method
-accepts calldata, a transaction preimage, an output list or a raw hash. A
-request carries four fields: chain, destination, amount, fee.
+**Mitigated for EVM, and now proven by construction tests.** No method accepts
+calldata, a transaction preimage, an output list or a raw hash. A request
+carries the chain, destination, amount and the gas parameters; the contract
+builds the transaction.
 
-Gate D/E must prove the constructed transaction matches those fields — EVM
-transaction hash cross-checked against viem, Bitcoin sighash against a
-bitcoinjs-lib fixture, outputs limited to the approved recipient plus change to
-the derived Keyring address. **Until those tests exist, invariants 5–8 are
-enforced by the absence of a dangerous parameter, not by a construction test.**
+The encoder is checked against viem fixtures, and tests assert that the
+approved recipient appears exactly once in the signed bytes, that the approved
+value is present, that changing any approved field changes the signing hash,
+and that the encoding ends with empty calldata and an empty access list. There
+is no `data` field on the transaction struct, so calldata cannot be attached at
+all.
+
+Bitcoin remains unproven (Gate E).
+
+Invariants 5 and 6 are now enforced by construction tests for EVM, not only by
+the absence of a dangerous parameter. Invariant 7 is vacuous because ERC-20
+transfers are not implemented (decision 21). Invariant 8 awaits Gate E.
 
 ### T8 — An agent asks the MPC signer directly
 
@@ -221,8 +229,9 @@ compromised *owner*.
 2. Bitcoin fee caps rest on UTXO data the contract cannot verify (decision 8).
 3. Replay protection is bounded at 32 keys per agent (decision 6).
 4. A failed broadcast still consumes budget until the window rolls (decision 4).
-5. Transaction-construction invariants (5–8) are not yet proven by construction
-   tests — only by the absence of dangerous parameters. Gate D/E must close this.
+5. EVM transaction construction is proven against viem, but **no transaction
+   has been included in a block**: the derived address is unfunded. Bitcoin
+   construction (invariant 8) remains entirely unimplemented.
 6. A failed signing consumes budget until the window rolls (decision 16).
 7. The mirrored MPC wire types must be re-checked whenever the signer contract
    is upgraded (decision 14).
