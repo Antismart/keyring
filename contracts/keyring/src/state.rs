@@ -1,7 +1,7 @@
 //! Persistent contract state: keyrings, agents and the request lifecycle.
 
-use crate::policy::{Policy, Refusal, SpendEntry};
-use crate::types::{Chain, ChainParams};
+use crate::policy::{AggregateBudget, Policy, Refusal, SpendEntry};
+use crate::types::{Asset, Chain, ChainParams};
 use near_sdk::json_types::U128;
 use near_sdk::{near, AccountId, PublicKey};
 
@@ -30,12 +30,69 @@ pub struct IdempotencyRecord {
     pub request_id: u64,
 }
 
-/// The rolling spend ledger for one chain.
+/// The rolling spend ledger for one asset on one chain.
+///
+/// Keyed by asset, not just chain, because caps are per asset: spending a
+/// token must not consume the native coin's budget, and vice versa.
 #[near(serializers = [json, borsh])]
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct ChainLedger {
+pub struct AssetLedger {
     pub chain: Chain,
+    pub asset: Asset,
     pub entries: Vec<SpendEntry>,
+}
+
+impl AssetLedger {
+    pub fn is(&self, chain: Chain, asset: &Asset) -> bool {
+        self.chain == chain && &self.asset == asset
+    }
+}
+
+/// Appends a reservation to the matching ledger in `ledgers`, creating it if
+/// absent. Shared by the agent ledger and the keyring-wide ledger.
+pub fn reserve_in(
+    ledgers: &mut Vec<AssetLedger>,
+    chain: Chain,
+    asset: &Asset,
+    amount: u128,
+    at_ms: u64,
+    request_id: u64,
+) {
+    let entry = SpendEntry {
+        at_ms,
+        amount: U128(amount),
+        request_id,
+    };
+    match ledgers.iter_mut().find(|l| l.is(chain, asset)) {
+        Some(ledger) => ledger.entries.push(entry),
+        None => ledgers.push(AssetLedger {
+            chain,
+            asset: asset.clone(),
+            entries: vec![entry],
+        }),
+    }
+}
+
+/// The unexpired-and-expired entries for one asset, or an empty slice.
+pub fn entries_in<'a>(ledgers: &'a [AssetLedger], chain: Chain, asset: &Asset) -> &'a [SpendEntry] {
+    ledgers
+        .iter()
+        .find(|l| l.is(chain, asset))
+        .map(|l| l.entries.as_slice())
+        .unwrap_or(&[])
+}
+
+/// Drops entries that have aged out of the rolling window.
+///
+/// Only ever removes *expired* entries, so it can never reduce the spend
+/// counted inside the window.
+pub fn prune_in(ledgers: &mut Vec<AssetLedger>, now_ms: u64) {
+    for ledger in ledgers.iter_mut() {
+        ledger
+            .entries
+            .retain(|e| !crate::policy::is_expired(e, now_ms));
+    }
+    ledgers.retain(|l| !l.entries.is_empty());
 }
 
 /// A registered agent.
@@ -52,7 +109,7 @@ pub struct Agent {
     /// The owner's kill switch (CLAUDE.md §3).
     pub enabled: bool,
     pub policy: Policy,
-    pub ledgers: Vec<ChainLedger>,
+    pub ledgers: Vec<AssetLedger>,
     pub created_at_ms: u64,
     pub requests_made: u64,
     /// Newest-last, bounded by [`MAX_IDEMPOTENCY_RECORDS`].
@@ -60,33 +117,25 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn ledger(&self, chain: Chain) -> Option<&ChainLedger> {
-        self.ledgers.iter().find(|l| l.chain == chain)
+    /// This agent's spend entries for one asset.
+    pub fn entries(&self, chain: Chain, asset: &Asset) -> &[SpendEntry] {
+        entries_in(&self.ledgers, chain, asset)
     }
 
-    pub fn entries(&self, chain: Chain) -> &[SpendEntry] {
-        self.ledger(chain)
-            .map(|l| l.entries.as_slice())
-            .unwrap_or(&[])
-    }
-
-    /// Records a reservation against the rolling budget.
+    /// Records a reservation against this agent's rolling budget.
     ///
-    /// Called *before* any asynchronous signing begins, per CLAUDE.md §6: budget
-    /// is committed at authorisation time, never after the signature returns.
-    pub fn reserve(&mut self, chain: Chain, amount: u128, at_ms: u64, request_id: u64) {
-        let entry = SpendEntry {
-            at_ms,
-            amount: U128(amount),
-            request_id,
-        };
-        match self.ledgers.iter_mut().find(|l| l.chain == chain) {
-            Some(ledger) => ledger.entries.push(entry),
-            None => self.ledgers.push(ChainLedger {
-                chain,
-                entries: vec![entry],
-            }),
-        }
+    /// Called *before* any asynchronous signing begins, per CLAUDE.md §6:
+    /// budget is committed at authorisation time, never after a signature
+    /// returns.
+    pub fn reserve(
+        &mut self,
+        chain: Chain,
+        asset: &Asset,
+        amount: u128,
+        at_ms: u64,
+        request_id: u64,
+    ) {
+        reserve_in(&mut self.ledgers, chain, asset, amount, at_ms, request_id);
     }
 
     /// Looks up a previously seen idempotency key.
@@ -128,6 +177,18 @@ pub struct Keyring {
     pub agents: Vec<Agent>,
     /// Newest-last index of recent request ids, bounded by [`MAX_HISTORY_IDS`].
     pub history: Vec<u64>,
+    /// Optional owner-wide 24-hour ceilings, across every agent.
+    pub aggregate: AggregateBudget,
+    /// Keyring-wide spend ledger, one entry per authorised request.
+    ///
+    /// This is the rolled-up counter the owner-wide cap is checked against.
+    /// Maintained alongside the agent ledger rather than computed by scanning
+    /// every agent, which would be O(agents * entries) on every request.
+    ///
+    /// It is deliberately **not** touched by `revoke_agent`. Destroying an
+    /// agent clears that agent's own ledger, but must not reduce the keyring
+    /// total, or revoke-and-re-register would reset the owner-wide budget.
+    pub ledgers: Vec<AssetLedger>,
 }
 
 impl Keyring {
@@ -137,7 +198,31 @@ impl Keyring {
             created_at_ms,
             agents: Vec::new(),
             history: Vec::new(),
+            aggregate: AggregateBudget::default(),
+            ledgers: Vec::new(),
         }
+    }
+
+    /// The keyring-wide entries for one asset.
+    pub fn entries(&self, chain: Chain, asset: &Asset) -> &[SpendEntry] {
+        entries_in(&self.ledgers, chain, asset)
+    }
+
+    /// Records a reservation against the keyring-wide budget.
+    pub fn reserve(
+        &mut self,
+        chain: Chain,
+        asset: &Asset,
+        amount: u128,
+        at_ms: u64,
+        request_id: u64,
+    ) {
+        reserve_in(&mut self.ledgers, chain, asset, amount, at_ms, request_id);
+    }
+
+    /// Drops keyring-wide entries that have aged out of the window.
+    pub fn prune_expired(&mut self, now_ms: u64) {
+        prune_in(&mut self.ledgers, now_ms);
     }
 
     pub fn agent(&self, public_key: &PublicKey) -> Option<&Agent> {
@@ -237,6 +322,8 @@ pub struct TransferRequest {
     pub owner: AccountId,
     pub agent_public_key: PublicKey,
     pub chain: Chain,
+    /// What was moved: the native coin, or a token.
+    pub asset: Asset,
     /// Normalised destination address.
     pub destination: String,
     pub amount: U128,

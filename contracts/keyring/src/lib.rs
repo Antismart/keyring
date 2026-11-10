@@ -57,12 +57,17 @@ use near_sdk::{
     env, near, require, AccountId, PanicOnDefault, Promise, PromiseError, PromiseOrValue, PublicKey,
 };
 
-use policy::{evaluate, validate_policy, Decision, Policy, Refusal, RefusalCode, TransferIntent};
+use policy::{
+    evaluate, validate_aggregate, validate_policy, AggregateBudget, Decision, Evaluation, Policy,
+    Refusal, RefusalCode, TransferIntent,
+};
 use signer::SignerBackend;
 use state::{
     Agent, Keyring, RequestStatus, StoredSignature, TransferRequest, MAX_AGENTS_PER_KEYRING,
 };
-use types::{normalize_destination, Chain, ChainParams, MAX_IDEMPOTENCY_KEY_LEN, MAX_LABEL_LEN};
+use types::{
+    normalize_destination, Asset, Chain, ChainParams, MAX_IDEMPOTENCY_KEY_LEN, MAX_LABEL_LEN,
+};
 
 /// What a caller gets back from `request_transfer`.
 ///
@@ -222,6 +227,34 @@ impl Contract {
         events::policy_changed(&owner, &public_key, &policy);
     }
 
+    /// Sets the keyring-wide 24-hour budget. Owner only.
+    ///
+    /// This bounds the sum across **every** agent the owner has registered,
+    /// which per-agent caps cannot do: an owner running N agents each capped at
+    /// C is otherwise exposed to N times C.
+    ///
+    /// Passing an empty budget removes the owner-wide limits and leaves only
+    /// the per-agent caps, which is the default.
+    ///
+    /// Lowering a cap below what is already committed in the current window
+    /// does not claw anything back — existing reservations stand — but it does
+    /// refuse further spending until the window rolls.
+    pub fn set_aggregate_budget(&mut self, budget: AggregateBudget) {
+        let owner = env::predecessor_account_id();
+        let budget = match validate_aggregate(budget) {
+            Ok(b) => b,
+            Err(e) => env::panic_str(&format!("invalid aggregate budget: {}", e.message())),
+        };
+        let keyring = self.require_keyring_mut(&owner);
+        keyring.aggregate = budget.clone();
+        events::aggregate_budget_changed(&owner, &budget);
+    }
+
+    /// The keyring-wide budget, and what has been committed against it.
+    pub fn get_aggregate_budget(&self, owner: AccountId) -> Option<AggregateBudget> {
+        Some(self.keyrings.get(&owner)?.aggregate.clone())
+    }
+
     /// Flips an agent's kill switch. Owner only.
     pub fn set_agent_enabled(&mut self, public_key: PublicKey, enabled: bool) {
         let owner = env::predecessor_account_id();
@@ -283,6 +316,7 @@ impl Contract {
     pub fn request_transfer(
         &mut self,
         chain: Chain,
+        asset: Asset,
         destination: String,
         amount: U128,
         params: ChainParams,
@@ -305,10 +339,29 @@ impl Contract {
             "transaction construction for this chain is not implemented"
         );
 
+        require!(
+            asset.is_valid_for(chain),
+            "this asset cannot exist on the requested chain"
+        );
+        // A token is identified by its contract address, canonicalised exactly
+        // as policy stores it, so `0xABC...` and `0xabc...` cannot name
+        // different assets.
+        let asset = match &asset {
+            Asset::Native => Asset::Native,
+            Asset::Erc20 { token } => Asset::Erc20 {
+                token: normalize_destination(chain, token)
+                    .unwrap_or_else(|| env::panic_str("token is not a valid contract address")),
+            },
+        };
+        let kind = match &asset {
+            Asset::Native => evm::EvmCallKind::Native,
+            Asset::Erc20 { .. } => evm::EvmCallKind::Erc20,
+        };
+
         // The fee is DERIVED from the same gas numbers that enter the signed
         // transaction, never taken from the caller (invariant 9).
         let evm = params.as_evm().expect("checked above");
-        if let Err(e) = evm.validate() {
+        if let Err(e) = evm.validate(kind) {
             env::panic_str(&format!("invalid transaction parameters: {}", e.message()));
         }
         let fee = U128(evm.max_fee_wei().expect("validated above"));
@@ -327,6 +380,19 @@ impl Contract {
         // stored destination are the same bytes the transaction will later be
         // built from.
         let normalized = normalize_destination(chain, &destination);
+
+        // Read the keyring-wide budget first. The agent is borrowed mutably
+        // out of the same keyring below, so these have to be owned copies.
+        let (owner_cap, owner_entries) = {
+            let k = self
+                .keyrings
+                .get(&owner)
+                .unwrap_or_else(|| env::panic_str("owner keyring missing"));
+            (
+                k.aggregate.cap_for(chain, &asset),
+                k.entries(chain, &asset).to_vec(),
+            )
+        };
 
         let keyring = self
             .keyrings
@@ -357,17 +423,20 @@ impl Contract {
             Some(dest) => {
                 let intent = TransferIntent {
                     chain,
+                    asset: asset.clone(),
                     destination: dest.clone(),
                     amount: amount.0,
                     fee: fee.0,
                 };
-                evaluate(
-                    agent.enabled,
-                    &agent.policy,
-                    agent.entries(chain),
-                    &intent,
-                    now,
-                )
+                evaluate(&Evaluation {
+                    enabled: agent.enabled,
+                    policy: &agent.policy,
+                    agent_entries: agent.entries(chain, &asset),
+                    owner_cap,
+                    owner_entries: &owner_entries,
+                    intent: &intent,
+                    now_ms: now,
+                })
             }
         };
 
@@ -381,11 +450,19 @@ impl Contract {
                 // begin. Two concurrent requests are serialised by the NEAR
                 // runtime, so the second sees the first's reservation and the
                 // aggregate can never exceed the cap (invariant 10).
-                agent.reserve(chain, reserve, now, request_id);
+                agent.reserve(chain, &asset, reserve, now, request_id);
                 (RequestStatus::Created, reserve, None)
             }
             Decision::Refuse(r) => (RequestStatus::Refused, 0u128, Some(r)),
         };
+
+        // The same reservation is recorded keyring-wide, so the owner-wide cap
+        // is checked against a rolled-up counter rather than by scanning every
+        // agent on every request. Revoking an agent does not clear this.
+        if reserved > 0 {
+            keyring.prune_expired(now);
+            keyring.reserve(chain, &asset, reserved, now, request_id);
+        }
 
         let evicted = keyring.push_history(request_id);
 
@@ -394,6 +471,7 @@ impl Contract {
             owner: owner.clone(),
             agent_public_key: agent_pk.clone(),
             chain,
+            asset: asset.clone(),
             destination: stored_destination.clone(),
             amount,
             fee,
@@ -450,14 +528,29 @@ impl Contract {
         // numbers are the ones the fee cap was just checked against.
         let to = evm::address_bytes(&stored_destination)
             .unwrap_or_else(|| env::panic_str("validated destination is not a 20-byte address"));
-        let tx = evm::Eip1559Transfer {
+        // The call is composed here from validated state. For a token transfer
+        // the calldata is built by the contract from the policy-approved token,
+        // recipient and amount; there is no field in which a caller could
+        // supply calldata of its own (invariant 7).
+        let call = match &asset {
+            Asset::Native => evm::EvmCall::NativeTransfer {
+                to,
+                value: amount.0,
+            },
+            Asset::Erc20 { token } => evm::EvmCall::Erc20Transfer {
+                token: evm::address_bytes(token)
+                    .unwrap_or_else(|| env::panic_str("validated token is not an address")),
+                to,
+                amount: amount.0,
+            },
+        };
+        let tx = evm::Eip1559Transaction {
             chain_id: evm::BASE_SEPOLIA_CHAIN_ID,
             nonce: evm.nonce.0,
             max_priority_fee_per_gas: evm.max_priority_fee_per_gas.0,
             max_fee_per_gas: evm.max_fee_per_gas.0,
             gas_limit: evm.gas_limit.0,
-            to,
-            value: amount.0,
+            call,
         };
         let payload = tx.signing_hash();
         let payload_hex = mpc::to_hex(&payload);
@@ -582,11 +675,16 @@ impl Contract {
     /// This is a `&self` view: it cannot mutate state, record a request or
     /// consume budget (CLAUDE.md §6). It takes the agent key as a parameter
     /// rather than reading the signer, so it works as a plain RPC query.
+    //
+    // Flat argument list for the same reason as `request_transfer`: it is the
+    // method's public JSON API.
+    #[allow(clippy::too_many_arguments)]
     pub fn simulate_transfer(
         &self,
         owner: AccountId,
         agent_public_key: PublicKey,
         chain: Chain,
+        asset: Asset,
         destination: String,
         amount: U128,
         params: ChainParams,
@@ -599,8 +697,23 @@ impl Contract {
             params.matches(chain),
             "transaction parameters do not match the requested chain"
         );
+        require!(
+            asset.is_valid_for(chain),
+            "this asset cannot exist on the requested chain"
+        );
+        let asset = match &asset {
+            Asset::Native => Asset::Native,
+            Asset::Erc20 { token } => Asset::Erc20 {
+                token: normalize_destination(chain, token)
+                    .unwrap_or_else(|| env::panic_str("token is not a valid contract address")),
+            },
+        };
+        let kind = match &asset {
+            Asset::Native => evm::EvmCallKind::Native,
+            Asset::Erc20 { .. } => evm::EvmCallKind::Erc20,
+        };
         let evm = params.as_evm().expect("checked above");
-        if let Err(e) = evm.validate() {
+        if let Err(e) = evm.validate(kind) {
             env::panic_str(&format!("invalid transaction parameters: {}", e.message()));
         }
         let fee = U128(evm.max_fee_wei().expect("validated above"));
@@ -622,8 +735,13 @@ impl Contract {
             };
         };
 
-        let cap_24h = agent.policy.chain_policy(chain).map(|c| c.max_per_24h);
-        let spent = policy::spend_in_window(agent.entries(chain), now);
+        let cap_24h = agent
+            .policy
+            .asset_policy(chain, &asset)
+            .map(|a| a.max_per_24h);
+        let spent = policy::spend_in_window(agent.entries(chain, &asset), now);
+        let owner_cap = keyring.aggregate.cap_for(chain, &asset);
+        let owner_entries = keyring.entries(chain, &asset);
 
         let decision = match normalize_destination(chain, &destination) {
             None => Decision::Refuse(Refusal::new(
@@ -633,17 +751,20 @@ impl Contract {
             Some(dest) => {
                 let intent = TransferIntent {
                     chain,
+                    asset: asset.clone(),
                     destination: dest,
                     amount: amount.0,
                     fee: fee.0,
                 };
-                evaluate(
-                    agent.enabled,
-                    &agent.policy,
-                    agent.entries(chain),
-                    &intent,
-                    now,
-                )
+                evaluate(&Evaluation {
+                    enabled: agent.enabled,
+                    policy: &agent.policy,
+                    agent_entries: agent.entries(chain, &asset),
+                    owner_cap,
+                    owner_entries,
+                    intent: &intent,
+                    now_ms: now,
+                })
             }
         };
 

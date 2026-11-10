@@ -40,6 +40,51 @@ impl Chain {
     }
 }
 
+/// What is being moved: the chain's native coin, or a token on it.
+///
+/// Amounts are always in the asset's own base units, which is why limits are
+/// per asset and not merely per chain: 1 USDC (6 decimals) and 1 ETH (18) are
+/// not comparable quantities, and comparing them against one cap would be
+/// meaningless. Fees are a separate matter — a fee is always paid in the
+/// chain's native coin, so the fee cap lives on the chain policy.
+#[near(serializers = [json, borsh])]
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Asset {
+    /// The chain's native coin: ETH on Base Sepolia, BTC on testnet4.
+    Native,
+    /// An ERC-20 token, identified by its normalised contract address.
+    Erc20 { token: String },
+}
+
+impl Asset {
+    /// Whether this asset can exist on `chain`.
+    pub fn is_valid_for(&self, chain: Chain) -> bool {
+        match self {
+            Asset::Native => true,
+            Asset::Erc20 { .. } => matches!(chain, Chain::BaseSepolia),
+        }
+    }
+
+    /// Short label for refusal messages and events.
+    pub fn label(&self) -> String {
+        match self {
+            Asset::Native => "native".to_string(),
+            Asset::Erc20 { token } => format!("erc20:{token}"),
+        }
+    }
+
+    /// The unit amounts of this asset are denominated in, for messages only.
+    pub fn base_unit(&self, chain: Chain) -> &'static str {
+        match self {
+            Asset::Native => chain.base_unit(),
+            // A token's decimals are a property of the token contract, which
+            // the contract does not read. Amounts are its smallest unit.
+            Asset::Erc20 { .. } => "token base units",
+        }
+    }
+}
+
 /// Maximum accepted length of a destination address string.
 ///
 /// Bounds storage and stops a caller from paying to inflate contract state

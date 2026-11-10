@@ -121,3 +121,11 @@ pub fn request_status_changed(request_id: u64, status: &RequestStatus) {
         json!({ "request_id": request_id, "status": status }),
     );
 }
+
+/// Emitted when the owner changes the keyring-wide budget.
+pub fn aggregate_budget_changed(owner: &AccountId, budget: &crate::policy::AggregateBudget) {
+    emit(
+        "aggregate_budget_changed",
+        json!({ "owner": owner, "aggregate": budget }),
+    );
+}
