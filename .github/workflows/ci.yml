@@ -96,19 +96,35 @@ jobs:
 
       # Invariant 17: no secret, key, seed phrase or funded credential may be
       # committed. A grep is a backstop, not a guarantee.
+      # The pattern over-matches on purpose. A NEAR private key and a NEAR
+      # public key are both 64 bytes of base58, so shape alone cannot separate
+      # them; loosening the pattern to stop flagging public keys would also
+      # stop it catching a leaked private one. Genuine public values are listed
+      # in .secret-scan-allowlist with a reason, so every exception is explicit
+      # and reviewable rather than absorbed into the regex.
       - name: Grep for committed key material
         run: |
           set +e
           PATTERN='(BEGIN [A-Z ]*PRIVATE KEY|ed25519:[1-9A-HJ-NP-Za-km-z]{80,}|"private_key"[[:space:]]*:|secp256k1:[1-9A-HJ-NP-Za-km-z]{80,})'
           MATCHES=$(grep -rInE "$PATTERN" . \
             --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=target \
-            --exclude=ci.yml)
+            --exclude=ci.yml --exclude=.secret-scan-allowlist)
+          # Drop lines whose only match is an allowlisted public value.
+          ALLOWED=$(grep -vE '^\s*(#|$)' .secret-scan-allowlist)
+          while IFS= read -r value; do
+            [ -z "$value" ] && continue
+            MATCHES=$(printf '%s\n' "$MATCHES" | grep -vF "$value")
+          done <<< "$ALLOWED"
+          MATCHES=$(printf '%s' "$MATCHES" | grep -vE '^\s*$')
           if [ -n "$MATCHES" ]; then
             echo "Possible committed key material:"
             echo "$MATCHES"
+            echo
+            echo "If a value is public by construction, add it to"
+            echo ".secret-scan-allowlist with a comment explaining why."
             exit 1
           fi
-          echo "No key material found."
+          echo "No unreviewed key material found."
 
       - name: Ensure no .env file is tracked
         run: |
