@@ -4,6 +4,7 @@
 //! it, so unused-item warnings here are expected rather than meaningful.
 #![allow(dead_code)]
 
+use keyring_contract::bitcoin::BitcoinParams;
 use keyring_contract::evm::EvmParams;
 use keyring_contract::policy::{
     AggregateBudget, AggregateCap, AssetPolicy, ChainPolicy, Policy, TimeWindow,
@@ -126,5 +127,37 @@ pub fn evm_params_with_fee(gas_limit: u64, max_fee_per_gas: u128) -> ChainParams
         gas_limit: U64(gas_limit),
         max_fee_per_gas: U128(max_fee_per_gas),
         max_priority_fee_per_gas: U128(0),
+    })
+}
+
+/// The well-known test key used by the Bitcoin fixtures, compressed.
+pub const BTC_PUBKEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+/// A testnet P2WPKH destination, derived from a different key.
+pub const BTC_DEST: &str = "tb1qq6hag67dl53wl99vzg42z8eyzfz2xlkvvlryfj";
+
+/// A Bitcoin testnet4 policy: 70k sat per request, 150k per 24h, 5k fee cap.
+pub fn btc_policy() -> Policy {
+    Policy {
+        chains: vec![ChainPolicy {
+            chain: Chain::BitcoinTestnet4,
+            max_fee: U128(5_000),
+            assets: vec![AssetPolicy {
+                asset: Asset::Native,
+                max_per_request: U128(70_000),
+                max_per_24h: U128(150_000),
+                allowed_destinations: vec![BTC_DEST.to_string()],
+            }],
+        }],
+        time_window: None,
+    }
+}
+
+/// Bitcoin spend parameters against a 100k sat UTXO.
+pub fn btc_params(fee: u128) -> ChainParams {
+    ChainParams::Bitcoin(BitcoinParams {
+        txid: "7f3e2a1b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7".to_string(),
+        vout: 1,
+        input_value: U128(100_000),
+        fee: U128(fee),
     })
 }
