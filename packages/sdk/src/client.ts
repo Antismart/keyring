@@ -258,6 +258,20 @@ export class KeyringClient {
     });
   }
 
+  /**
+   * Registers an agent's compressed Bitcoin public key. Owner only.
+   *
+   * Required before the agent can spend on Bitcoin: the contract needs it to
+   * build the change output. Use `deriveBitcoinKey` to obtain the value from
+   * the MPC signer rather than entering it by hand.
+   */
+  async setAgentBtcPubkey(publicKey: PublicKeyString, compressedHex: string): Promise<void> {
+    await this.near.call<void>(this.contractId, "set_agent_btc_pubkey", {
+      public_key: publicKey,
+      compressed_hex: compressedHex,
+    });
+  }
+
   /** Removes an agent entirely. Owner only. */
   async revokeAgent(publicKey: PublicKeyString): Promise<void> {
     await this.near.call<void>(this.contractId, "revoke_agent", {

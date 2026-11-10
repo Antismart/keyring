@@ -57,8 +57,32 @@ export interface EvmParams {
   max_priority_fee_per_gas: string;
 }
 
+/**
+ * The UTXO a Bitcoin spend consumes.
+ *
+ * `input_value` is supplied by the relayer and the contract cannot verify it —
+ * but BIP143 commits it to the signature, so misreporting it produces a
+ * signature that will not verify against the real UTXO. `fee` is a target used
+ * to size the change output; the contract recomputes the fee the transaction
+ * actually pays and checks that against the cap.
+ */
+export interface BitcoinParams {
+  /** Previous transaction id in the usual big-endian display form. */
+  txid: string;
+  vout: number;
+  /** The UTXO's value in satoshis, as a decimal string. */
+  input_value: BaseUnits;
+  /** Target fee in satoshis, as a decimal string. */
+  fee: BaseUnits;
+}
+
 /** Chain-specific transaction parameters. */
-export type ChainParams = { evm: EvmParams };
+export type ChainParams = { evm: EvmParams } | { bitcoin: BitcoinParams };
+
+/** Narrows {@link ChainParams} to the EVM case. */
+export function isEvmParams(p: ChainParams): p is { evm: EvmParams } {
+  return "evm" in p;
+}
 
 /** A NEAR public key in `ed25519:<base58>` or `secp256k1:<base58>` form. */
 export type PublicKeyString = string;
@@ -216,6 +240,14 @@ export interface Agent {
   created_at_ms: number;
   requests_made: number;
   recent_keys: { key: string; request_id: number }[];
+  /**
+   * The agent's compressed Bitcoin public key, registered by the owner.
+   *
+   * Needed so the contract can build the change output itself. Derive it with
+   * `deriveBitcoinKey` rather than transcribing it: a wrong value sends change
+   * to an address the Keyring does not control.
+   */
+  btc_pubkey: string | null;
 }
 
 /** An owner's Keyring. */

@@ -17,7 +17,7 @@
  * than a failed transaction would.
  */
 
-import type { Asset, Chain, EvmParams } from "@keyring/sdk";
+import type { Asset, BitcoinParams, Chain, ChainParams, EvmParams } from "@keyring/sdk";
 
 /** Names of the tools this server exposes. */
 export const TOOL_NAMES = [
@@ -113,14 +113,17 @@ function requireBaseUnits(input: Record<string, unknown>, field: string): string
  * `gas_limit * max_fee_per_gas`, so a caller cannot declare one fee and have a
  * transaction signed that authorises another.
  */
-function requireEvmParams(input: Record<string, unknown>, field: string): { evm: EvmParams } {
+function requireChainParams(input: Record<string, unknown>, field: string): ChainParams {
   const raw = input[field];
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new ToolInputError(field, "expected an object");
   }
   const outer = raw as Record<string, unknown>;
+  if ("bitcoin" in outer) {
+    return { bitcoin: requireBitcoinParams(outer) };
+  }
   if (!("evm" in outer)) {
-    throw new ToolInputError(field, "expected an 'evm' key for an EVM chain");
+    throw new ToolInputError(field, "expected an 'evm' or 'bitcoin' key");
   }
   const evm = outer.evm;
   if (typeof evm !== "object" || evm === null || Array.isArray(evm)) {
@@ -142,6 +145,36 @@ function requireEvmParams(input: Record<string, unknown>, field: string): { evm:
     );
   }
   return { evm: params };
+}
+
+/**
+ * Validates the UTXO a Bitcoin spend consumes.
+ *
+ * `input_value` cannot be verified by the contract, but BIP143 commits it to
+ * the signature, so a wrong value yields a signature that will not verify
+ * rather than an oversized fee. `fee` is a target: the contract recomputes
+ * what the transaction actually pays and checks that against the cap.
+ */
+function requireBitcoinParams(outer: Record<string, unknown>): BitcoinParams {
+  const raw = outer.bitcoin;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ToolInputError("params.bitcoin", "expected an object");
+  }
+  const b = raw as Record<string, unknown>;
+  const txid = b.txid;
+  if (typeof txid !== "string" || !/^[0-9a-fA-F]{64}$/.test(txid)) {
+    throw new ToolInputError("params.bitcoin.txid", "expected 32 bytes of hex");
+  }
+  const vout = b.vout;
+  if (typeof vout !== "number" || !Number.isInteger(vout) || vout < 0 || vout > 0xffffffff) {
+    throw new ToolInputError("params.bitcoin.vout", "expected a uint32");
+  }
+  return {
+    txid,
+    vout,
+    input_value: requireBaseUnits(b, "input_value"),
+    fee: requireBaseUnits(b, "fee"),
+  };
 }
 
 /**
@@ -185,7 +218,7 @@ export interface SimulateTransferInput {
   asset: Asset;
   destination: string;
   amount: string;
-  params: { evm: EvmParams };
+  params: ChainParams;
 }
 
 export interface RequestTransferInput {
@@ -193,7 +226,7 @@ export interface RequestTransferInput {
   asset: Asset;
   destination: string;
   amount: string;
-  params: { evm: EvmParams };
+  params: ChainParams;
   idempotency_key: string;
 }
 
@@ -228,7 +261,7 @@ export function validateSimulateTransfer(raw: unknown): SimulateTransferInput {
     asset: requireAsset(input, "asset"),
     destination: requireString(input, "destination", 128),
     amount: requireBaseUnits(input, "amount"),
-    params: requireEvmParams(input, "params"),
+    params: requireChainParams(input, "params"),
   };
 }
 
@@ -239,7 +272,7 @@ export function validateRequestTransfer(raw: unknown): RequestTransferInput {
     asset: requireAsset(input, "asset"),
     destination: requireString(input, "destination", 128),
     amount: requireBaseUnits(input, "amount"),
-    params: requireEvmParams(input, "params"),
+    params: requireChainParams(input, "params"),
     idempotency_key: requireString(input, "idempotency_key", 64),
   };
 }
@@ -333,10 +366,22 @@ export const TOOL_SCHEMAS: Record<ToolName, { description: string; inputSchema: 
         params: {
           type: "object",
           additionalProperties: false,
-          required: ["evm"],
+          minProperties: 1,
+          maxProperties: 1,
           description:
-            "Chain-specific transaction inputs. No fee field: the contract derives the fee from gas_limit and max_fee_per_gas.",
+            "Chain-specific transaction inputs. There is no declared fee: the contract derives what the transaction really pays and checks that against the cap.",
           properties: {
+            bitcoin: {
+              type: "object",
+              additionalProperties: false,
+              required: ["txid", "vout", "input_value", "fee"],
+              properties: {
+                txid: { type: "string", pattern: "^[0-9a-fA-F]{64}$" },
+                vout: { type: "integer", minimum: 0 },
+                input_value: { type: "string", pattern: "^[0-9]+$" },
+                fee: { type: "string", pattern: "^[0-9]+$" },
+              },
+            },
             evm: {
               type: "object",
               additionalProperties: false,
@@ -387,10 +432,22 @@ export const TOOL_SCHEMAS: Record<ToolName, { description: string; inputSchema: 
         params: {
           type: "object",
           additionalProperties: false,
-          required: ["evm"],
+          minProperties: 1,
+          maxProperties: 1,
           description:
-            "Chain-specific transaction inputs. No fee field: the contract derives the fee from gas_limit and max_fee_per_gas.",
+            "Chain-specific transaction inputs. There is no declared fee: the contract derives what the transaction really pays and checks that against the cap.",
           properties: {
+            bitcoin: {
+              type: "object",
+              additionalProperties: false,
+              required: ["txid", "vout", "input_value", "fee"],
+              properties: {
+                txid: { type: "string", pattern: "^[0-9a-fA-F]{64}$" },
+                vout: { type: "integer", minimum: 0 },
+                input_value: { type: "string", pattern: "^[0-9]+$" },
+                fee: { type: "string", pattern: "^[0-9]+$" },
+              },
+            },
             evm: {
               type: "object",
               additionalProperties: false,

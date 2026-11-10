@@ -20,6 +20,7 @@ import {
   buildSignedTransaction,
   createSigningConnection,
   createViewConnection,
+  deriveBitcoinKey,
   deriveEvmAddress,
   isRefused,
   KeyringClient,
@@ -71,6 +72,31 @@ function loadConfig(): Config {
   };
 }
 
+/**
+ * Chain-specific transaction inputs, as either shape.
+ *
+ * There is no declared fee in either: the contract derives what the
+ * transaction really pays and checks that against the cap.
+ */
+const CHAIN_PARAMS = z.union([
+  z.object({
+    evm: z.object({
+      nonce: z.string(),
+      gas_limit: z.string(),
+      max_fee_per_gas: z.string(),
+      max_priority_fee_per_gas: z.string(),
+    }),
+  }),
+  z.object({
+    bitcoin: z.object({
+      txid: z.string().describe("Previous txid, 32 bytes of hex in display order"),
+      vout: z.number().int().min(0),
+      input_value: z.string().describe("The UTXO's value in satoshis"),
+      fee: z.string().describe("Target fee in satoshis; the contract checks the real one"),
+    }),
+  }),
+]);
+
 const json = (value: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
 });
@@ -110,8 +136,24 @@ export async function main(): Promise<void> {
       if (!path) {
         return failure(`no agent registered with key ${agent_public_key}`);
       }
-      if (chain !== "base_sepolia") {
-        return json({ chain, derivation_path: path, address: null, note: "not implemented" });
+      if (chain === "bitcoin_testnet4") {
+        const btc = await deriveBitcoinKey({
+          path,
+          predecessor: config.contractId,
+          rpcUrl: config.nearRpcUrl,
+        });
+        const agent = await client.getAgent(config.owner, agent_public_key);
+        return json({
+          chain,
+          derivation_path: path,
+          address: btc.address,
+          compressed_pubkey: btc.compressedPubkey,
+          registered_with_contract: agent?.btc_pubkey === btc.compressedPubkey,
+          note:
+            agent?.btc_pubkey === btc.compressedPubkey
+              ? "Ready: the contract can build change outputs for this agent."
+              : "The owner must register this key with set_agent_btc_pubkey before Bitcoin spends can be built.",
+        });
       }
       const derived = await deriveEvmAddress({
         path,
@@ -160,14 +202,7 @@ export async function main(): Promise<void> {
           .describe('"native" for the chain coin, or { erc20: { token } } for a token'),
         destination: z.string(),
         amount: z.string().describe("Amount in the asset's base units, as a decimal string"),
-        params: z.object({
-          evm: z.object({
-            nonce: z.string(),
-            gas_limit: z.string(),
-            max_fee_per_gas: z.string(),
-            max_priority_fee_per_gas: z.string(),
-          }),
-        }),
+        params: CHAIN_PARAMS,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -242,14 +277,7 @@ export async function main(): Promise<void> {
             .describe('"native" for the chain coin, or { erc20: { token } } for a token'),
           destination: z.string(),
           amount: z.string(),
-          params: z.object({
-            evm: z.object({
-              nonce: z.string(),
-              gas_limit: z.string(),
-              max_fee_per_gas: z.string(),
-              max_priority_fee_per_gas: z.string(),
-            }),
-          }),
+          params: CHAIN_PARAMS,
           idempotency_key: z.string().max(64),
         },
         annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
