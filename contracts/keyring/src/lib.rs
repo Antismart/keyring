@@ -145,13 +145,49 @@ impl Contract {
     /// Initialises the contract with its signing backend.
     #[init]
     pub fn new(signer: SignerBackend) -> Self {
+        Self::with_prefix_version(signer, 1)
+    }
+
+    /// Builds state under versioned storage prefixes.
+    ///
+    /// The prefix version exists for [`Contract::migrate_reset`]: a fresh
+    /// `IterableMap` over the same prefix still *reads* whatever the previous
+    /// layout wrote there, so resetting state requires new prefixes rather
+    /// than a new map object.
+    fn with_prefix_version(signer: SignerBackend, version: u8) -> Self {
         Self {
-            keyrings: IterableMap::new(b"k".to_vec()),
-            agent_owner: IterableMap::new(b"o".to_vec()),
-            requests: IterableMap::new(b"r".to_vec()),
+            keyrings: IterableMap::new(format!("k{version}").into_bytes()),
+            agent_owner: IterableMap::new(format!("o{version}").into_bytes()),
+            requests: IterableMap::new(format!("r{version}").into_bytes()),
             next_request_id: 1,
             signer,
         }
+    }
+
+    /// Replaces the contract state with a fresh, empty one.
+    ///
+    /// Needed when the state layout changes incompatibly: old records would
+    /// fail to deserialise and any view touching them would panic. This
+    /// discards **all** keyrings, agents and request history.
+    ///
+    /// `#[private]` restricts it to the contract account itself, which is the
+    /// account that deploys. It is a development tool: a deployment holding
+    /// real policy would need a migration that preserves state, not one that
+    /// drops it, and this method should be removed before any such use.
+    ///
+    /// `prefix_version` must be a value not used before on this account.
+    /// Reusing one would leave the previous layout's entries readable under
+    /// the same keys, which is exactly the bug this parameter exists to avoid.
+    /// The old entries are orphaned rather than deleted, so their storage
+    /// stake stays locked — acceptable for a development account, and the
+    /// reason this is not a production migration.
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate_reset(signer: SignerBackend, prefix_version: u8) -> Self {
+        env::log_str(&format!(
+            "keyring: state reset onto prefix version {prefix_version}; prior records orphaned"
+        ));
+        Self::with_prefix_version(signer, prefix_version)
     }
 
     // ---------------------------------------------------------------- owner API
