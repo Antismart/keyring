@@ -17,6 +17,21 @@
 /** An integer amount in base units, as a decimal string. */
 export type BaseUnits = string;
 
+/**
+ * What is being moved.
+ *
+ * Amounts are always in the asset's own base units, which is why limits are
+ * per asset rather than merely per chain: 1 USDC (6 decimals) and 1 ETH (18)
+ * are not comparable quantities. Fees are separate — always paid in the
+ * chain's native coin — so the fee cap lives on the chain policy.
+ */
+export type Asset = "native" | { erc20: { token: string } };
+
+/** Narrows an {@link Asset} to the ERC-20 case. */
+export function isErc20(asset: Asset): asset is { erc20: { token: string } } {
+  return typeof asset === "object" && "erc20" in asset;
+}
+
 /** Chains Keyring can sign for. Mirrors the Rust `Chain` enum. */
 export type Chain = "base_sepolia" | "bitcoin_testnet4";
 
@@ -61,14 +76,49 @@ export interface TimeWindow {
   end_minute: number;
 }
 
-/** Per-chain limits. The presence of an entry is itself the chain allowlist. */
-export interface ChainPolicy {
-  chain: Chain;
+/**
+ * Limits for one asset on one chain.
+ *
+ * The presence of an entry is itself the asset allowlist: an agent permitted to
+ * move a token is not thereby permitted to send native value, or the reverse.
+ */
+export interface AssetPolicy {
+  asset: Asset;
   max_per_request: BaseUnits;
   max_per_24h: BaseUnits;
-  max_fee: BaseUnits;
   /** Allowlisted destinations. An empty array permits nobody, never anybody. */
   allowed_destinations: string[];
+}
+
+/**
+ * Per-chain policy. The presence of an entry is the chain allowlist.
+ *
+ * `max_fee` is in the chain's native units because a fee is always paid in the
+ * native coin — an ERC-20 transfer still costs ETH.
+ */
+export interface ChainPolicy {
+  chain: Chain;
+  max_fee: BaseUnits;
+  assets: AssetPolicy[];
+}
+
+/** An owner-wide 24-hour ceiling for one asset on one chain. */
+export interface AggregateCap {
+  chain: Chain;
+  asset: Asset;
+  max_per_24h: BaseUnits;
+}
+
+/**
+ * The keyring-wide budget.
+ *
+ * Agent caps bound a single agent; this bounds the sum across every agent the
+ * owner has registered. Without it, an owner running N agents each capped at C
+ * is exposed to N x C. Optional: an empty `caps` array means per-agent limits
+ * only, which is the default.
+ */
+export interface AggregateBudget {
+  caps: AggregateCap[];
 }
 
 /** A complete agent policy. */
@@ -87,6 +137,7 @@ export type RefusalCode =
   | "agent_not_registered"
   | "agent_disabled"
   | "chain_not_allowed"
+  | "asset_not_allowed"
   | "malformed_destination"
   | "destination_not_allowed"
   | "outside_time_window"
@@ -94,7 +145,9 @@ export type RefusalCode =
   | "per_request_cap_exceeded"
   | "fee_cap_exceeded"
   | "daily_cap_exceeded"
+  | "owner_daily_cap_exceeded"
   | "budget_ledger_full"
+  | "owner_budget_ledger_full"
   | "duplicate_request";
 
 /** A structured policy refusal. */
@@ -146,8 +199,10 @@ export interface SpendEntry {
   request_id: number;
 }
 
-export interface ChainLedger {
+/** The rolling ledger for one asset on one chain. */
+export interface AssetLedger {
   chain: Chain;
+  asset: Asset;
   entries: SpendEntry[];
 }
 
@@ -157,7 +212,7 @@ export interface Agent {
   label: string;
   enabled: boolean;
   policy: Policy;
-  ledgers: ChainLedger[];
+  ledgers: AssetLedger[];
   created_at_ms: number;
   requests_made: number;
   recent_keys: { key: string; request_id: number }[];
@@ -169,6 +224,15 @@ export interface Keyring {
   created_at_ms: number;
   agents: Agent[];
   history: number[];
+  /** Owner-wide 24-hour ceilings, across every agent. */
+  aggregate: AggregateBudget;
+  /**
+   * The keyring-wide rolling ledger the owner-wide cap is checked against.
+   *
+   * Deliberately not cleared when an agent is revoked, so revoking and
+   * re-registering cannot reset the owner-wide budget.
+   */
+  ledgers: AssetLedger[];
 }
 
 /** A transfer request and its audit record. */
@@ -177,6 +241,8 @@ export interface TransferRequest {
   owner: AccountId;
   agent_public_key: PublicKeyString;
   chain: Chain;
+  /** What was moved: the native coin, or a token. */
+  asset: Asset;
   destination: string;
   amount: BaseUnits;
   /**

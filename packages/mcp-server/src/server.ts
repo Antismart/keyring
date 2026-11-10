@@ -138,8 +138,9 @@ export async function main(): Promise<void> {
         enabled: agent.enabled,
         label: agent.label,
         policy: agent.policy,
+        aggregate_budget: await client.getAggregateBudget(config.owner),
         note: agent.enabled
-          ? "Caps are per agent and per chain. There is no owner-wide aggregate budget."
+          ? "Caps are per agent, per chain and per asset. aggregate_budget, when non-empty, additionally caps the total across all of this owner's agents."
           : "This agent is DISABLED by its owner; every request will be refused.",
       });
     },
@@ -154,8 +155,11 @@ export async function main(): Promise<void> {
       inputSchema: {
         agent_public_key: z.string(),
         chain: z.enum(["base_sepolia", "bitcoin_testnet4"]),
+        asset: z
+          .union([z.literal("native"), z.object({ erc20: z.object({ token: z.string() }) })])
+          .describe('"native" for the chain coin, or { erc20: { token } } for a token'),
         destination: z.string(),
-        amount: z.string().describe("Amount in base units (wei) as a decimal string"),
+        amount: z.string().describe("Amount in the asset's base units, as a decimal string"),
         params: z.object({
           evm: z.object({
             nonce: z.string(),
@@ -172,6 +176,7 @@ export async function main(): Promise<void> {
         const input = validateSimulateTransfer({ owner: config.owner, ...args });
         const result = await client.simulateTransfer(config.owner, input.agent_public_key, {
           chain: input.chain,
+          asset: input.asset,
           destination: input.destination,
           amount: input.amount,
           params: input.params,
@@ -208,6 +213,7 @@ export async function main(): Promise<void> {
             status: r.status,
             chain: r.chain,
             destination: r.destination,
+            asset: r.asset,
             amount: r.amount,
             fee: r.fee,
             refusal: r.refusal,
@@ -231,6 +237,9 @@ export async function main(): Promise<void> {
           "Request a payment within policy. The contract decides: a refusal is a normal result carrying the rule that refused it, not an error to retry blindly. Reusing an idempotency_key returns the original request instead of paying twice. There is no fee argument — the contract derives the fee from the gas parameters.",
         inputSchema: {
           chain: z.enum(["base_sepolia", "bitcoin_testnet4"]),
+          asset: z
+            .union([z.literal("native"), z.object({ erc20: z.object({ token: z.string() }) })])
+            .describe('"native" for the chain coin, or { erc20: { token } } for a token'),
           destination: z.string(),
           amount: z.string(),
           params: z.object({
@@ -250,6 +259,7 @@ export async function main(): Promise<void> {
           const input = validateRequestTransfer(args);
           const outcome = await client.requestTransfer({
             chain: input.chain,
+            asset: input.asset,
             destination: input.destination,
             amount: input.amount,
             params: input.params,

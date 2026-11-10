@@ -17,7 +17,7 @@
  * than a failed transaction would.
  */
 
-import type { Chain, EvmParams } from "@keyring/sdk";
+import type { Asset, Chain, EvmParams } from "@keyring/sdk";
 
 /** Names of the tools this server exposes. */
 export const TOOL_NAMES = [
@@ -144,6 +144,30 @@ function requireEvmParams(input: Record<string, unknown>, field: string): { evm:
   return { evm: params };
 }
 
+/**
+ * Validates the asset being moved.
+ *
+ * Accepts the string `"native"` or `{ erc20: { token } }`. A token address is
+ * checked for shape here only; the contract canonicalises it and matches it
+ * against the agent's asset policy, which is what actually grants permission.
+ */
+function requireAsset(input: Record<string, unknown>, field: string): Asset {
+  const raw = input[field];
+  if (raw === "native") return "native";
+  if (typeof raw === "object" && raw !== null && !Array.isArray(raw) && "erc20" in raw) {
+    const inner = (raw as { erc20: unknown }).erc20;
+    if (typeof inner !== "object" || inner === null || Array.isArray(inner)) {
+      throw new ToolInputError(`${field}.erc20`, "expected an object with a token address");
+    }
+    const token = (inner as Record<string, unknown>).token;
+    if (typeof token !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(token)) {
+      throw new ToolInputError(`${field}.erc20.token`, "expected a 0x-prefixed 20-byte address");
+    }
+    return { erc20: { token } };
+  }
+  throw new ToolInputError(field, 'expected "native" or { erc20: { token } }');
+}
+
 export interface GetAddressesInput {
   owner: string;
   agent_public_key: string;
@@ -158,6 +182,7 @@ export interface SimulateTransferInput {
   owner: string;
   agent_public_key: string;
   chain: Chain;
+  asset: Asset;
   destination: string;
   amount: string;
   params: { evm: EvmParams };
@@ -165,6 +190,7 @@ export interface SimulateTransferInput {
 
 export interface RequestTransferInput {
   chain: Chain;
+  asset: Asset;
   destination: string;
   amount: string;
   params: { evm: EvmParams };
@@ -199,6 +225,7 @@ export function validateSimulateTransfer(raw: unknown): SimulateTransferInput {
     owner: requireString(input, "owner", 64),
     agent_public_key: requireString(input, "agent_public_key", 128),
     chain: requireChain(input, "chain"),
+    asset: requireAsset(input, "asset"),
     destination: requireString(input, "destination", 128),
     amount: requireBaseUnits(input, "amount"),
     params: requireEvmParams(input, "params"),
@@ -209,6 +236,7 @@ export function validateRequestTransfer(raw: unknown): RequestTransferInput {
   const input = asRecord(raw);
   return {
     chain: requireChain(input, "chain"),
+    asset: requireAsset(input, "asset"),
     destination: requireString(input, "destination", 128),
     amount: requireBaseUnits(input, "amount"),
     params: requireEvmParams(input, "params"),
@@ -271,11 +299,31 @@ export const TOOL_SCHEMAS: Record<ToolName, { description: string; inputSchema: 
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["owner", "agent_public_key", "chain", "destination", "amount", "params"],
+      required: ["owner", "agent_public_key", "chain", "asset", "destination", "amount", "params"],
       properties: {
         owner: { type: "string" },
         agent_public_key: { type: "string" },
         chain: { type: "string", enum: [...CHAINS] },
+        asset: {
+          description:
+            'What to move: "native" for the chain coin, or { erc20: { token } } for a token.',
+          oneOf: [
+            { type: "string", enum: ["native"] },
+            {
+              type: "object",
+              additionalProperties: false,
+              required: ["erc20"],
+              properties: {
+                erc20: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["token"],
+                  properties: { token: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" } },
+                },
+              },
+            },
+          ],
+        },
         destination: { type: "string", description: "Destination address in chain-native form" },
         amount: {
           type: "string",
@@ -311,9 +359,29 @@ export const TOOL_SCHEMAS: Record<ToolName, { description: string; inputSchema: 
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["chain", "destination", "amount", "params", "idempotency_key"],
+      required: ["chain", "asset", "destination", "amount", "params", "idempotency_key"],
       properties: {
         chain: { type: "string", enum: [...CHAINS] },
+        asset: {
+          description:
+            'What to move: "native" for the chain coin, or { erc20: { token } } for a token.',
+          oneOf: [
+            { type: "string", enum: ["native"] },
+            {
+              type: "object",
+              additionalProperties: false,
+              required: ["erc20"],
+              properties: {
+                erc20: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["token"],
+                  properties: { token: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" } },
+                },
+              },
+            },
+          ],
+        },
         destination: { type: "string" },
         amount: { type: "string", pattern: "^[0-9]+$" },
         params: {

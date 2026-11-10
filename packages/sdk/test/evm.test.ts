@@ -13,6 +13,7 @@ import { test } from "node:test";
 import {
   buildSignedTransaction,
   signingHash,
+  toSerializable,
   toViemSignature,
   verifySignedTransaction,
   type TransferRequest,
@@ -33,6 +34,7 @@ function request(overrides: Partial<TransferRequest> = {}): TransferRequest {
     owner: "owner.testnet",
     agent_public_key: "ed25519:abc",
     chain: "base_sepolia",
+    asset: "native",
     destination: F.to,
     amount: F.value,
     fee: (BigInt(F.gas_limit) * BigInt(F.max_fee_per_gas)).toString(),
@@ -117,4 +119,60 @@ test("tampering with the recipient after signing is caught", () => {
 test("an untampered transaction verifies against its request", () => {
   const req = request();
   verifySignedTransaction(req, buildSignedTransaction(req));
+});
+
+// ------------------------------------------------------- ERC-20 assembly
+
+const TOKEN_F = fixtures.fixtures.find((f: { name: string }) => f.name === "erc20_transfer");
+
+/** A token-transfer request as the contract would record it. */
+function tokenRequest(overrides: Partial<TransferRequest> = {}): TransferRequest {
+  return {
+    ...request(),
+    asset: { erc20: { token: TOKEN_F.token } },
+    // For a token transfer the recipient is the policy destination, and the
+    // amount is in the token's base units.
+    destination: TOKEN_F.recipient,
+    amount: TOKEN_F.token_amount,
+    params: {
+      evm: {
+        nonce: String(TOKEN_F.nonce),
+        gas_limit: TOKEN_F.gas_limit,
+        max_fee_per_gas: TOKEN_F.max_fee_per_gas,
+        max_priority_fee_per_gas: TOKEN_F.max_priority_fee_per_gas,
+      },
+    },
+    payload_hex: TOKEN_F.signing_hash.slice(2),
+    ...overrides,
+  } as TransferRequest;
+}
+
+test("a token transfer recomputes the same hash as the contract", () => {
+  assert.equal(signingHash(tokenRequest()), TOKEN_F.signing_hash);
+});
+
+test("the assembled token transfer matches the viem reference", () => {
+  assert.equal(buildSignedTransaction(tokenRequest()), TOKEN_F.signed_rlp);
+});
+
+test("redirecting a token transfer after signing is caught in the calldata", () => {
+  // For a token transfer the recipient lives in the calldata, not in `to`, so
+  // comparing `to` and `value` alone would miss a redirected payment.
+  const req = tokenRequest();
+  const raw = buildSignedTransaction(req);
+  const tampered = tokenRequest({ destination: "0x9999999999999999999999999999999999999999" });
+  assert.throws(() => verifySignedTransaction(tampered, raw), /calldata:/);
+});
+
+test("changing a token amount after signing is caught in the calldata", () => {
+  const req = tokenRequest();
+  const raw = buildSignedTransaction(req);
+  const tampered = tokenRequest({ amount: (BigInt(TOKEN_F.token_amount) + 1n).toString() });
+  assert.throws(() => verifySignedTransaction(tampered, raw), /calldata:/);
+});
+
+test("a token transfer sends no native value", () => {
+  const serializable = toSerializable(tokenRequest()) as { value: bigint; to: string };
+  assert.equal(serializable.value, 0n);
+  assert.equal(serializable.to.toLowerCase(), TOKEN_F.token.toLowerCase());
 });

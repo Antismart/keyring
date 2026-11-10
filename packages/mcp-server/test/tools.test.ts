@@ -29,6 +29,7 @@ const VALID_PARAMS = {
 
 const VALID_TRANSFER = {
   chain: "base_sepolia",
+  asset: "native",
   destination: "0x1111111111111111111111111111111111111111",
   amount: "1000000000000000000",
   params: VALID_PARAMS,
@@ -114,6 +115,7 @@ test("simulate_transfer requires owner and agent key", () => {
     chain: "base_sepolia",
     destination: VALID_TRANSFER.destination,
     amount: "1",
+    asset: "native",
     params: VALID_PARAMS,
   });
   assert.equal(ok.owner, "owner.testnet");
@@ -182,4 +184,33 @@ test("missing EVM params are rejected", () => {
     () => validateRequestTransfer({ ...VALID_TRANSFER, params: {} }),
     (err: unknown) => err instanceof ToolInputError && err.field === "params",
   );
+});
+
+test("an ERC-20 asset validates and keeps its token address", () => {
+  const out = validateRequestTransfer({
+    ...VALID_TRANSFER,
+    asset: { erc20: { token: "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" } },
+  });
+  assert.deepEqual(out.asset, {
+    erc20: { token: "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
+  });
+});
+
+test("a malformed token address is rejected", () => {
+  for (const token of ["0x123", "not-an-address", "", "0xZZZZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]) {
+    assert.throws(
+      () => validateRequestTransfer({ ...VALID_TRANSFER, asset: { erc20: { token } } }),
+      (err: unknown) => err instanceof ToolInputError,
+      `token ${JSON.stringify(token)} should be rejected`,
+    );
+  }
+});
+
+test("an unknown asset shape is rejected", () => {
+  for (const asset of ["eth", {}, { erc721: { token: "0x" } }, null, 1]) {
+    assert.throws(
+      () => validateRequestTransfer({ ...VALID_TRANSFER, asset }),
+      (err: unknown) => err instanceof ToolInputError,
+    );
+  }
 });

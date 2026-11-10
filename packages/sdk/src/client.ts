@@ -19,7 +19,9 @@
 
 import type {
   AccountId,
+  AggregateBudget,
   Agent,
+  Asset,
   BaseUnits,
   Chain,
   ChainParams,
@@ -62,6 +64,8 @@ export interface KeyringClientOptions {
 /** Arguments for a transfer request. */
 export interface TransferArgs {
   chain: Chain;
+  /** The native coin, or `{ erc20: { token } }` for a token transfer. */
+  asset: Asset;
   /** Destination address in its chain-native form. */
   destination: string;
   /** Amount in base units (wei / satoshi) as a decimal string. */
@@ -149,6 +153,7 @@ export class KeyringClient {
       owner,
       agent_public_key: agentPublicKey,
       chain: args.chain,
+      asset: args.asset,
       destination: args.destination,
       amount: args.amount,
       params: args.params,
@@ -233,6 +238,26 @@ export class KeyringClient {
     });
   }
 
+  /**
+   * Sets the keyring-wide 24-hour budget. Owner only.
+   *
+   * Bounds the sum across every agent, which per-agent caps cannot do. An
+   * empty `caps` array removes the owner-wide limits.
+   *
+   * Lowering a cap below what is already committed does not claw anything
+   * back; it refuses further spending until the window rolls.
+   */
+  async setAggregateBudget(budget: AggregateBudget): Promise<void> {
+    await this.near.call<void>(this.contractId, "set_aggregate_budget", { budget });
+  }
+
+  /** The keyring-wide budget, or `null` if the owner has no keyring. */
+  async getAggregateBudget(owner: AccountId): Promise<AggregateBudget | null> {
+    return this.near.view<AggregateBudget | null>(this.contractId, "get_aggregate_budget", {
+      owner,
+    });
+  }
+
   /** Removes an agent entirely. Owner only. */
   async revokeAgent(publicKey: PublicKeyString): Promise<void> {
     await this.near.call<void>(this.contractId, "revoke_agent", {
@@ -252,6 +277,7 @@ export class KeyringClient {
   async requestTransfer(args: TransferArgs): Promise<RequestOutcome> {
     return this.near.call<RequestOutcome>(this.contractId, "request_transfer", {
       chain: args.chain,
+      asset: args.asset,
       destination: args.destination,
       amount: args.amount,
       params: args.params,

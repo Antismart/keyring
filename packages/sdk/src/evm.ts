@@ -17,14 +17,18 @@
 import { keccak_256 } from "@noble/hashes/sha3";
 import { base58 } from "@scure/base";
 import {
+  encodeFunctionData,
   keccak256,
+  parseAbi,
   parseTransaction,
   serializeTransaction,
   type Hex,
   type TransactionSerializableEIP1559,
 } from "viem";
 
-import type { EvmParams, StoredSignature, TransferRequest } from "./types.js";
+import { isErc20, type EvmParams, type StoredSignature, type TransferRequest } from "./types.js";
+
+const ERC20_ABI = parseAbi(["function transfer(address to, uint256 amount) returns (bool)"]);
 
 /** Chain ids for the EVM chains Keyring supports. */
 export const CHAIN_IDS = { base_sepolia: 84532 } as const;
@@ -43,15 +47,35 @@ export function toSerializable(request: TransferRequest): TransactionSerializabl
   if (chainId === undefined) {
     throw new Error(`no EVM chain id known for ${request.chain}`);
   }
-  return {
-    type: "eip1559",
+  const base = {
+    type: "eip1559" as const,
     chainId,
     nonce: Number(p.nonce),
-    to: request.destination as Hex,
-    value: BigInt(request.amount),
     gas: BigInt(p.gas_limit),
     maxFeePerGas: BigInt(p.max_fee_per_gas),
     maxPriorityFeePerGas: BigInt(p.max_priority_fee_per_gas),
+  };
+
+  // A token transfer is a call to the token contract: the recipient lives in
+  // the calldata, `to` is the token, and no native value is sent. This mirrors
+  // what the contract built; the hash check below proves they agree.
+  if (isErc20(request.asset)) {
+    return {
+      ...base,
+      to: request.asset.erc20.token as Hex,
+      value: 0n,
+      data: encodeFunctionData({
+        abi: ERC20_ABI,
+        functionName: "transfer",
+        args: [request.destination as Hex, BigInt(request.amount)],
+      }),
+    };
+  }
+
+  return {
+    ...base,
+    to: request.destination as Hex,
+    value: BigInt(request.amount),
   };
 }
 
@@ -125,6 +149,14 @@ export function verifySignedTransaction(request: TransferRequest, raw: Hex): voi
   const parsed = parseTransaction(raw);
   const expected = toSerializable(request);
   const mismatches: string[] = [];
+  // For a token transfer the recipient and amount live in the calldata, so
+  // comparing `to` and `value` alone would not catch a redirected payment.
+  if (isErc20(request.asset)) {
+    const expectedData = (expected as { data?: Hex }).data;
+    if (parsed.data !== expectedData) {
+      mismatches.push(`calldata: ${parsed.data} != ${expectedData}`);
+    }
+  }
   if (parsed.to?.toLowerCase() !== expected.to?.toLowerCase()) {
     mismatches.push(`to: ${parsed.to} != ${expected.to}`);
   }
