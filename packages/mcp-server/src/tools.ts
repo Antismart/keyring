@@ -1,0 +1,285 @@
+/**
+ * Tool definitions and input validation for the Keyring MCP server.
+ *
+ * ## The tool surface is the attack surface
+ *
+ * An MCP server is called by an untrusted agent runtime (CLAUDE.md §4), so what
+ * matters most here is what is *absent*. There is no tool to register an agent,
+ * change a policy, enable an agent, or sign anything arbitrary. Every
+ * privileged action stays with the owner, who performs it through the SDK or
+ * CLI with their own NEAR key.
+ *
+ * The five tools below are exactly the capability an agent needs to spend
+ * within limits and to understand a refusal — nothing more.
+ *
+ * Validation here is defence in depth, not enforcement: the contract re-checks
+ * everything. Rejecting malformed input early just produces a clearer error
+ * than a failed transaction would.
+ */
+
+import type { Chain } from "@keyring/sdk";
+
+/** Names of the tools this server exposes. */
+export const TOOL_NAMES = [
+  "get_addresses",
+  "get_policy",
+  "simulate_transfer",
+  "request_transfer",
+  "get_history",
+] as const;
+
+export type ToolName = (typeof TOOL_NAMES)[number];
+
+/** A validation failure, with the field that caused it. */
+export class ToolInputError extends Error {
+  constructor(
+    readonly field: string,
+    message: string,
+  ) {
+    super(`${field}: ${message}`);
+    this.name = "ToolInputError";
+  }
+}
+
+const CHAINS: readonly Chain[] = ["base_sepolia", "bitcoin_testnet4"];
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ToolInputError("input", "expected an object");
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireString(input: Record<string, unknown>, field: string, maxLength: number): string {
+  const value = input[field];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ToolInputError(field, "expected a non-empty string");
+  }
+  if (value.length > maxLength) {
+    throw new ToolInputError(field, `must be at most ${maxLength} characters`);
+  }
+  return value;
+}
+
+function requireChain(input: Record<string, unknown>, field: string): Chain {
+  const value = input[field];
+  if (typeof value !== "string" || !CHAINS.includes(value as Chain)) {
+    throw new ToolInputError(field, `expected one of: ${CHAINS.join(", ")}`);
+  }
+  return value as Chain;
+}
+
+/**
+ * Validates an amount in base units.
+ *
+ * Amounts must be decimal integer **strings**. A JSON number is rejected
+ * outright rather than coerced: `Number` cannot represent large wei values
+ * exactly, and silently rounding a payment amount is precisely the class of bug
+ * CLAUDE.md §3 bans floating point to prevent.
+ */
+function requireBaseUnits(input: Record<string, unknown>, field: string): string {
+  const value = input[field];
+  if (typeof value === "number") {
+    throw new ToolInputError(
+      field,
+      "must be a decimal string, not a number — JavaScript numbers cannot represent base-unit amounts exactly",
+    );
+  }
+  if (typeof value !== "string" || !/^[0-9]+$/.test(value)) {
+    throw new ToolInputError(field, "expected a decimal integer string in base units");
+  }
+  if (value.length > 1 && value.startsWith("0")) {
+    throw new ToolInputError(field, "must not have leading zeros");
+  }
+  let parsed: bigint;
+  try {
+    parsed = BigInt(value);
+  } catch {
+    throw new ToolInputError(field, "is not a valid integer");
+  }
+  if (parsed < 0n) {
+    throw new ToolInputError(field, "must not be negative");
+  }
+  if (parsed > (1n << 128n) - 1n) {
+    throw new ToolInputError(field, "exceeds the maximum u128 value");
+  }
+  return value;
+}
+
+export interface GetAddressesInput {
+  owner: string;
+  agent_public_key: string;
+}
+
+export interface GetPolicyInput {
+  owner: string;
+  agent_public_key: string;
+}
+
+export interface SimulateTransferInput {
+  owner: string;
+  agent_public_key: string;
+  chain: Chain;
+  destination: string;
+  amount: string;
+  fee: string;
+}
+
+export interface RequestTransferInput {
+  chain: Chain;
+  destination: string;
+  amount: string;
+  fee: string;
+  idempotency_key: string;
+}
+
+export interface GetHistoryInput {
+  owner: string;
+  from_index?: number;
+  limit?: number;
+}
+
+export function validateGetAddresses(raw: unknown): GetAddressesInput {
+  const input = asRecord(raw);
+  return {
+    owner: requireString(input, "owner", 64),
+    agent_public_key: requireString(input, "agent_public_key", 128),
+  };
+}
+
+export function validateGetPolicy(raw: unknown): GetPolicyInput {
+  const input = asRecord(raw);
+  return {
+    owner: requireString(input, "owner", 64),
+    agent_public_key: requireString(input, "agent_public_key", 128),
+  };
+}
+
+export function validateSimulateTransfer(raw: unknown): SimulateTransferInput {
+  const input = asRecord(raw);
+  return {
+    owner: requireString(input, "owner", 64),
+    agent_public_key: requireString(input, "agent_public_key", 128),
+    chain: requireChain(input, "chain"),
+    destination: requireString(input, "destination", 128),
+    amount: requireBaseUnits(input, "amount"),
+    fee: requireBaseUnits(input, "fee"),
+  };
+}
+
+export function validateRequestTransfer(raw: unknown): RequestTransferInput {
+  const input = asRecord(raw);
+  return {
+    chain: requireChain(input, "chain"),
+    destination: requireString(input, "destination", 128),
+    amount: requireBaseUnits(input, "amount"),
+    fee: requireBaseUnits(input, "fee"),
+    idempotency_key: requireString(input, "idempotency_key", 64),
+  };
+}
+
+export function validateGetHistory(raw: unknown): GetHistoryInput {
+  const input = asRecord(raw);
+  const owner = requireString(input, "owner", 64);
+  const result: GetHistoryInput = { owner };
+  if (input.from_index !== undefined) {
+    const n = input.from_index;
+    if (typeof n !== "number" || !Number.isInteger(n) || n < 0) {
+      throw new ToolInputError("from_index", "expected a non-negative integer");
+    }
+    result.from_index = n;
+  }
+  if (input.limit !== undefined) {
+    const n = input.limit;
+    if (typeof n !== "number" || !Number.isInteger(n) || n < 1 || n > 100) {
+      throw new ToolInputError("limit", "expected an integer between 1 and 100");
+    }
+    result.limit = n;
+  }
+  return result;
+}
+
+/** JSON Schemas advertised to the MCP client, one per tool. */
+export const TOOL_SCHEMAS: Record<ToolName, { description: string; inputSchema: object }> = {
+  get_addresses: {
+    description:
+      "Return the MPC derivation paths for an agent's keys. Read-only; does not move funds.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["owner", "agent_public_key"],
+      properties: {
+        owner: { type: "string", description: "NEAR account id of the Keyring owner" },
+        agent_public_key: { type: "string", description: "The agent's registered NEAR public key" },
+      },
+    },
+  },
+  get_policy: {
+    description:
+      "Return the spending policy that applies to an agent, including caps and allowed destinations. Read-only.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["owner", "agent_public_key"],
+      properties: {
+        owner: { type: "string" },
+        agent_public_key: { type: "string" },
+      },
+    },
+  },
+  simulate_transfer: {
+    description:
+      "Ask whether a transfer would be allowed, and if not, why. Reserves no budget and records nothing. Call this before request_transfer to avoid an avoidable refusal.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["owner", "agent_public_key", "chain", "destination", "amount", "fee"],
+      properties: {
+        owner: { type: "string" },
+        agent_public_key: { type: "string" },
+        chain: { type: "string", enum: [...CHAINS] },
+        destination: { type: "string", description: "Destination address in chain-native form" },
+        amount: {
+          type: "string",
+          pattern: "^[0-9]+$",
+          description: "Amount in base units (wei or satoshi) as a decimal string",
+        },
+        fee: { type: "string", pattern: "^[0-9]+$", description: "Fee in base units" },
+      },
+    },
+  },
+  request_transfer: {
+    description:
+      "Request a transfer within policy. The contract decides; a refusal is a normal result with a structured reason, not an error to retry blindly. Repeating the same idempotency_key returns the original request instead of paying twice.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["chain", "destination", "amount", "fee", "idempotency_key"],
+      properties: {
+        chain: { type: "string", enum: [...CHAINS] },
+        destination: { type: "string" },
+        amount: { type: "string", pattern: "^[0-9]+$" },
+        fee: { type: "string", pattern: "^[0-9]+$" },
+        idempotency_key: {
+          type: "string",
+          maxLength: 64,
+          description: "A unique key for this payment; reuse it to retry safely",
+        },
+      },
+    },
+  },
+  get_history: {
+    description:
+      "Return recent transfer requests and their outcomes, newest first, including refusal reasons. Read-only.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["owner"],
+      properties: {
+        owner: { type: "string" },
+        from_index: { type: "integer", minimum: 0 },
+        limit: { type: "integer", minimum: 1, maximum: 100 },
+      },
+    },
+  },
+};
