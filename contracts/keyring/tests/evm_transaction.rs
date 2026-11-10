@@ -13,8 +13,9 @@ mod common;
 use common::*;
 
 use keyring_contract::evm::{
-    address_bytes, rlp_uint, to_be_minimal, Eip1559Transfer, EvmParams, EvmParamsError,
-    BASE_SEPOLIA_CHAIN_ID, MAX_TRANSFER_GAS, MIN_TRANSFER_GAS,
+    address_bytes, erc20_transfer_calldata, rlp_uint, to_be_minimal, Eip1559Transaction, EvmCall,
+    EvmCallKind, EvmParams, EvmParamsError, BASE_SEPOLIA_CHAIN_ID, ERC20_TRANSFER_SELECTOR,
+    MAX_TRANSFER_GAS, MIN_TRANSFER_GAS,
 };
 use near_sdk::json_types::{U128, U64};
 use near_sdk::serde_json;
@@ -22,6 +23,23 @@ use near_sdk::test_utils::VMContextBuilder;
 use near_sdk::testing_env;
 
 const FIXTURES: &str = include_str!("fixtures/eip1559.json");
+
+/// Builds the call a fixture describes. A fixture with a `token` field is an
+/// ERC-20 transfer; otherwise it is a native one.
+fn call_from_fixture(f: &serde_json::Value) -> EvmCall {
+    let to = address_bytes(f["to"].as_str().unwrap()).expect("fixture address");
+    match f.get("token").and_then(|t| t.as_str()) {
+        Some(token) => EvmCall::Erc20Transfer {
+            token: address_bytes(token).expect("fixture token"),
+            to: address_bytes(f["recipient"].as_str().unwrap()).expect("fixture recipient"),
+            amount: f["token_amount"].as_str().unwrap().parse().unwrap(),
+        },
+        None => EvmCall::NativeTransfer {
+            to,
+            value: f["value"].as_str().unwrap().parse().unwrap(),
+        },
+    }
+}
 
 fn hex_of(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(2 + bytes.len() * 2);
@@ -60,7 +78,7 @@ fn every_transaction_matches_the_viem_reference() {
 
     for f in fixtures {
         let name = f["name"].as_str().unwrap();
-        let tx = Eip1559Transfer {
+        let tx = Eip1559Transaction {
             chain_id: f["chain_id"].as_u64().unwrap(),
             nonce: f["nonce"].as_u64().unwrap(),
             max_priority_fee_per_gas: f["max_priority_fee_per_gas"]
@@ -70,8 +88,7 @@ fn every_transaction_matches_the_viem_reference() {
                 .unwrap(),
             max_fee_per_gas: f["max_fee_per_gas"].as_str().unwrap().parse().unwrap(),
             gas_limit: f["gas_limit"].as_str().unwrap().parse().unwrap(),
-            to: address_bytes(f["to"].as_str().unwrap()).expect("fixture address"),
-            value: f["value"].as_str().unwrap().parse().unwrap(),
+            call: call_from_fixture(f),
         };
 
         assert_eq!(
@@ -183,15 +200,19 @@ fn the_fee_is_gas_limit_times_max_fee_per_gas() {
 
 #[test]
 fn gas_limit_boundaries_are_enforced() {
-    assert!(params(MIN_TRANSFER_GAS, 1, 0).validate().is_ok());
+    assert!(params(MIN_TRANSFER_GAS, 1, 0)
+        .validate(EvmCallKind::Native)
+        .is_ok());
     assert_eq!(
-        params(MIN_TRANSFER_GAS - 1, 1, 0).validate(),
+        params(MIN_TRANSFER_GAS - 1, 1, 0).validate(EvmCallKind::Native),
         Err(EvmParamsError::GasLimitTooLow),
         "below intrinsic gas the transfer cannot succeed"
     );
-    assert!(params(MAX_TRANSFER_GAS, 1, 0).validate().is_ok());
+    assert!(params(MAX_TRANSFER_GAS, 1, 0)
+        .validate(EvmCallKind::Native)
+        .is_ok());
     assert_eq!(
-        params(MAX_TRANSFER_GAS + 1, 1, 0).validate(),
+        params(MAX_TRANSFER_GAS + 1, 1, 0).validate(EvmCallKind::Native),
         Err(EvmParamsError::GasLimitTooHigh),
         "an absurd gas limit only raises the fee ceiling"
     );
@@ -200,11 +221,13 @@ fn gas_limit_boundaries_are_enforced() {
 #[test]
 fn a_tip_above_the_fee_cap_is_rejected_as_viem_rejects_it() {
     assert!(
-        params(21_000, 100, 100).validate().is_ok(),
+        params(21_000, 100, 100)
+            .validate(EvmCallKind::Native)
+            .is_ok(),
         "tip may equal the cap"
     );
     assert_eq!(
-        params(21_000, 100, 101).validate(),
+        params(21_000, 100, 101).validate(EvmCallKind::Native),
         Err(EvmParamsError::PriorityFeeAboveMaxFee)
     );
 }
@@ -212,7 +235,7 @@ fn a_tip_above_the_fee_cap_is_rejected_as_viem_rejects_it() {
 #[test]
 fn a_zero_fee_cap_is_rejected() {
     assert_eq!(
-        params(21_000, 0, 0).validate(),
+        params(21_000, 0, 0).validate(EvmCallKind::Native),
         Err(EvmParamsError::ZeroMaxFee)
     );
 }
@@ -221,7 +244,7 @@ fn a_zero_fee_cap_is_rejected() {
 fn a_fee_that_would_overflow_is_rejected_rather_than_wrapping() {
     // Wrapping here would compute a tiny fee for an enormous transaction.
     assert_eq!(
-        params(MAX_TRANSFER_GAS, u128::MAX, 0).validate(),
+        params(MAX_TRANSFER_GAS, u128::MAX, 0).validate(EvmCallKind::Native),
         Err(EvmParamsError::FeeOverflow)
     );
 }
@@ -232,14 +255,16 @@ fn a_fee_that_would_overflow_is_rejected_rather_than_wrapping() {
 fn the_signed_transaction_carries_the_approved_recipient_and_value() {
     vm();
     let to = address_bytes(DEST_A).unwrap();
-    let tx = Eip1559Transfer {
+    let tx = Eip1559Transaction {
         chain_id: BASE_SEPOLIA_CHAIN_ID,
         nonce: 3,
         max_priority_fee_per_gas: 1_000_000,
         max_fee_per_gas: 1_000_000_000,
         gas_limit: 21_000,
-        to,
-        value: 777_000_000_000_000,
+        call: EvmCall::NativeTransfer {
+            to,
+            value: 777_000_000_000_000,
+        },
     };
     let encoded = tx.unsigned_encoding();
 
@@ -267,19 +292,24 @@ fn the_signed_transaction_carries_the_approved_recipient_and_value() {
 #[test]
 fn changing_any_approved_field_changes_the_signing_hash() {
     vm();
-    let base = Eip1559Transfer {
+    let base = Eip1559Transaction {
         chain_id: BASE_SEPOLIA_CHAIN_ID,
         nonce: 1,
         max_priority_fee_per_gas: 1,
         max_fee_per_gas: 100,
         gas_limit: 21_000,
-        to: address_bytes(DEST_A).unwrap(),
-        value: 1_000,
+        call: EvmCall::NativeTransfer {
+            to: address_bytes(DEST_A).unwrap(),
+            value: 1_000,
+        },
     };
     let h = base.signing_hash();
 
     let mut other_to = base.clone();
-    other_to.to = address_bytes(DEST_B).unwrap();
+    other_to.call = EvmCall::NativeTransfer {
+        to: address_bytes(DEST_B).unwrap(),
+        value: 1_000,
+    };
     assert_ne!(
         h,
         other_to.signing_hash(),
@@ -287,7 +317,10 @@ fn changing_any_approved_field_changes_the_signing_hash() {
     );
 
     let mut other_value = base.clone();
-    other_value.value = 1_001;
+    other_value.call = EvmCall::NativeTransfer {
+        to: address_bytes(DEST_A).unwrap(),
+        value: 1_001,
+    };
     assert_ne!(
         h,
         other_value.signing_hash(),
@@ -314,14 +347,16 @@ fn changing_any_approved_field_changes_the_signing_hash() {
 #[test]
 fn the_transaction_has_no_calldata_and_no_access_list() {
     vm();
-    let tx = Eip1559Transfer {
+    let tx = Eip1559Transaction {
         chain_id: BASE_SEPOLIA_CHAIN_ID,
         nonce: 0,
         max_priority_fee_per_gas: 0,
         max_fee_per_gas: 1,
         gas_limit: 21_000,
-        to: address_bytes(DEST_A).unwrap(),
-        value: 1,
+        call: EvmCall::NativeTransfer {
+            to: address_bytes(DEST_A).unwrap(),
+            value: 1,
+        },
     };
     let encoded = tx.unsigned_encoding();
     // A plain transfer ends with empty data (0x80) and an empty access list
@@ -332,4 +367,153 @@ fn the_transaction_has_no_calldata_and_no_access_list() {
         &[0x80, 0xc0],
         "data and access_list must both be empty"
     );
+}
+
+// ------------------------------------------------------ ERC-20 calldata
+
+#[test]
+fn the_transfer_selector_is_the_keccak_of_its_signature() {
+    // Hard-coded in the contract, so this guards against a typo in the constant.
+    vm();
+    let hash = near_sdk::env::keccak256("transfer(address,uint256)".as_bytes());
+    assert_eq!(&hash[..4], &ERC20_TRANSFER_SELECTOR[..]);
+}
+
+#[test]
+fn erc20_calldata_is_exactly_selector_then_two_padded_words() {
+    let to = [0x11u8; 20];
+    let data = erc20_transfer_calldata(&to, 1_000_000);
+    assert_eq!(
+        data.len(),
+        4 + 32 + 32,
+        "a transfer call is always 68 bytes"
+    );
+    assert_eq!(&data[..4], &ERC20_TRANSFER_SELECTOR[..]);
+    // The address is right-aligned in its 32-byte word.
+    assert_eq!(&data[4..16], &[0u8; 12], "address must be left-padded");
+    assert_eq!(&data[16..36], &to[..]);
+    // The amount is a big-endian uint256.
+    assert_eq!(&data[36..52], &[0u8; 16], "amount must be left-padded");
+    assert_eq!(&data[52..], &1_000_000u128.to_be_bytes()[..]);
+}
+
+#[test]
+fn a_token_transfer_targets_the_token_and_sends_no_value() {
+    // The recipient must be inside the calldata, not in the `to` field: a
+    // token transfer is a call to the token contract.
+    let token = address_bytes(TOKEN).unwrap();
+    let to = address_bytes(DEST_A).unwrap();
+    let call = EvmCall::Erc20Transfer {
+        token,
+        to,
+        amount: 5 * ONE_USDC,
+    };
+    assert_eq!(call.tx_to(), token, "the transaction must target the token");
+    assert_eq!(call.tx_value(), 0, "a token transfer sends no native value");
+    assert_eq!(call.kind(), EvmCallKind::Erc20);
+
+    let data = call.tx_data();
+    assert!(
+        data.windows(20).any(|w| w == to),
+        "the recipient must appear in the calldata"
+    );
+}
+
+#[test]
+fn the_recipient_and_amount_bind_a_token_transfer_signature() {
+    vm();
+    let base = Eip1559Transaction {
+        chain_id: BASE_SEPOLIA_CHAIN_ID,
+        nonce: 1,
+        max_priority_fee_per_gas: 1,
+        max_fee_per_gas: 100,
+        gas_limit: 65_000,
+        call: EvmCall::Erc20Transfer {
+            token: address_bytes(TOKEN).unwrap(),
+            to: address_bytes(DEST_A).unwrap(),
+            amount: ONE_USDC,
+        },
+    };
+    let h = base.signing_hash();
+
+    let mut other_recipient = base.clone();
+    other_recipient.call = EvmCall::Erc20Transfer {
+        token: address_bytes(TOKEN).unwrap(),
+        to: address_bytes(DEST_B).unwrap(),
+        amount: ONE_USDC,
+    };
+    assert_ne!(h, other_recipient.signing_hash());
+
+    let mut other_amount = base.clone();
+    other_amount.call = EvmCall::Erc20Transfer {
+        token: address_bytes(TOKEN).unwrap(),
+        to: address_bytes(DEST_A).unwrap(),
+        amount: ONE_USDC + 1,
+    };
+    assert_ne!(h, other_amount.signing_hash());
+
+    // A different token is a different transaction even for the same transfer.
+    let mut other_token = base.clone();
+    other_token.call = EvmCall::Erc20Transfer {
+        token: address_bytes(TOKEN_OTHER).unwrap(),
+        to: address_bytes(DEST_A).unwrap(),
+        amount: ONE_USDC,
+    };
+    assert_ne!(h, other_token.signing_hash());
+}
+
+#[test]
+fn a_native_transfer_still_carries_no_calldata() {
+    let call = EvmCall::NativeTransfer {
+        to: address_bytes(DEST_A).unwrap(),
+        value: 1,
+    };
+    assert!(call.tx_data().is_empty());
+    assert_eq!(call.kind(), EvmCallKind::Native);
+}
+
+#[test]
+fn token_transfers_are_allowed_more_gas_than_native_ones() {
+    // A native transfer costs exactly 21000, so its ceiling can be tight. A
+    // token transfer runs the token's code, so it needs a looser bound.
+    assert!(EvmCallKind::Erc20.min_gas() > EvmCallKind::Native.min_gas());
+    assert!(EvmCallKind::Erc20.max_gas() > EvmCallKind::Native.max_gas());
+
+    let p = EvmParams {
+        nonce: U64(0),
+        gas_limit: U64(65_000),
+        max_fee_per_gas: U128(1),
+        max_priority_fee_per_gas: U128(0),
+    };
+    assert!(p.validate(EvmCallKind::Erc20).is_ok());
+    assert_eq!(
+        p.validate(EvmCallKind::Native),
+        Ok(()),
+        "65000 is inside the native bound too"
+    );
+
+    // Below the token floor, even though it clears the native one.
+    let too_low = EvmParams {
+        gas_limit: U64(21_000),
+        ..p.clone()
+    };
+    assert!(too_low.validate(EvmCallKind::Native).is_ok());
+    assert_eq!(
+        too_low.validate(EvmCallKind::Erc20),
+        Err(EvmParamsError::GasLimitTooLow)
+    );
+}
+
+#[test]
+fn the_fixture_set_covers_token_transfers() {
+    let doc: serde_json::Value = serde_json::from_str(FIXTURES).unwrap();
+    let names: Vec<&str> = doc["fixtures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    for required in ["erc20_transfer", "erc20_large_amount"] {
+        assert!(names.contains(&required), "fixture {required} is missing");
+    }
 }

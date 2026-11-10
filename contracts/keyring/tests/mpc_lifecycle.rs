@@ -9,12 +9,12 @@
 mod common;
 use common::*;
 
-use keyring_contract::evm::{address_bytes, Eip1559Transfer, BASE_SEPOLIA_CHAIN_ID};
+use keyring_contract::evm::{address_bytes, Eip1559Transaction, EvmCall, BASE_SEPOLIA_CHAIN_ID};
 use keyring_contract::mpc;
 use keyring_contract::policy::RefusalCode;
 use keyring_contract::signer::SignerBackend;
 use keyring_contract::state::RequestStatus;
-use keyring_contract::types::Chain;
+use keyring_contract::types::{Asset, Chain};
 use keyring_contract::{Contract, RequestOutcome};
 use near_sdk::json_types::U128;
 use near_sdk::test_utils::VMContextBuilder;
@@ -46,6 +46,7 @@ fn request(c: &mut Contract, amount: u128, key: &str) -> PromiseOrValue<RequestO
     ctx_from("agent-host.testnet", pk(1), at_utc(12, 0));
     c.request_transfer(
         Chain::BaseSepolia,
+        Asset::Native,
         DEST_A.to_string(),
         U128(amount),
         evm_params(),
@@ -140,14 +141,16 @@ fn the_signed_payload_is_the_real_transaction_hash() {
     let _ = request(&mut c, ONE_ETH, "k1");
     let req = c.get_request(1).expect("request recorded");
 
-    let expected = Eip1559Transfer {
+    let expected = Eip1559Transaction {
         chain_id: BASE_SEPOLIA_CHAIN_ID,
         nonce: 0,
         max_priority_fee_per_gas: 1_000_000,
         max_fee_per_gas: 1_000_000_000,
         gas_limit: 21_000,
-        to: address_bytes(DEST_A).expect("valid destination"),
-        value: ONE_ETH,
+        call: EvmCall::NativeTransfer {
+            to: address_bytes(DEST_A).expect("valid destination"),
+            value: ONE_ETH,
+        },
     }
     .signing_hash();
 
@@ -173,6 +176,7 @@ fn inflated_gas_parameters_are_caught_by_the_fee_cap() {
     ctx_from("agent-host.testnet", pk(1), at_utc(12, 0));
     let out = c.request_transfer(
         Chain::BaseSepolia,
+        Asset::Native,
         DEST_A.to_string(),
         U128(1),
         // 200000 gas at 1000 gwei = 2e17 wei, far above the 1e16 fee cap.
@@ -198,6 +202,7 @@ fn parameters_for_the_wrong_chain_are_rejected() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         c.request_transfer(
             Chain::BitcoinTestnet4,
+            Asset::Native,
             "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".to_string(),
             U128(1),
             evm_params(),

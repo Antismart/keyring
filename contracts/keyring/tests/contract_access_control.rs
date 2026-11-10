@@ -11,7 +11,7 @@ use common::*;
 use keyring_contract::policy::RefusalCode;
 use keyring_contract::signer::SignerBackend;
 use keyring_contract::state::RequestStatus;
-use keyring_contract::types::Chain;
+use keyring_contract::types::{Asset, Chain};
 use keyring_contract::{Contract, RequestOutcome};
 use near_sdk::json_types::U128;
 use near_sdk::test_utils::VMContextBuilder;
@@ -56,6 +56,7 @@ fn transfer(
     ctx(STRANGER, signer_pk, now_ms);
     match c.request_transfer(
         Chain::BaseSepolia,
+        Asset::Native,
         DEST_A.to_string(),
         U128(amount),
         evm_params(),
@@ -158,7 +159,7 @@ fn an_invalid_policy_is_never_stored() {
     let mut c = setup();
     ctx(OWNER, pk(0), at_utc(12, 0));
     let mut bad = evm_policy();
-    bad.chains[0].allowed_destinations = vec!["nonsense".to_string()];
+    bad.chains[0].assets[0].allowed_destinations = vec!["nonsense".to_string()];
     c.set_policy(pk(1), bad);
 }
 
@@ -413,6 +414,7 @@ fn simulate_transfer_does_not_consume_budget() {
             account(OWNER),
             pk(1),
             Chain::BaseSepolia,
+            Asset::Native,
             DEST_A.to_string(),
             U128(ONE_ETH),
             evm_params(),
@@ -434,6 +436,7 @@ fn simulate_transfer_reports_the_refusal_a_real_request_would_get() {
         account(OWNER),
         pk(1),
         Chain::BaseSepolia,
+        Asset::Native,
         DEST_EVIL.to_string(),
         U128(1),
         evm_params(),
@@ -452,6 +455,7 @@ fn simulate_reports_unregistered_agents_without_panicking() {
         account(OWNER),
         pk(77),
         Chain::BaseSepolia,
+        Asset::Native,
         DEST_A.to_string(),
         U128(1),
         evm_params(),
@@ -517,10 +521,13 @@ fn an_agents_path_differs_per_chain() {
     let mut p = evm_policy();
     p.chains.push(keyring_contract::policy::ChainPolicy {
         chain: Chain::BitcoinTestnet4,
-        max_per_request: U128(100_000),
-        max_per_24h: U128(200_000),
         max_fee: U128(5_000),
-        allowed_destinations: vec!["tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".to_string()],
+        assets: vec![keyring_contract::policy::AssetPolicy {
+            asset: Asset::Native,
+            max_per_request: U128(100_000),
+            max_per_24h: U128(200_000),
+            allowed_destinations: vec!["tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".to_string()],
+        }],
     });
     c.set_policy(pk(1), p);
 
@@ -555,4 +562,166 @@ fn an_owner_id_cannot_be_spoofed_by_a_parameter() {
         .expect("keyring for the caller");
     assert_eq!(k.owner, account(STRANGER));
     assert!(c.get_keyring(account(OWNER)).is_none());
+}
+
+// ------------------------------------------- owner-wide aggregate budget
+
+#[test]
+fn an_owner_wide_cap_bounds_the_sum_across_agents() {
+    // The point of the feature. Two agents each permitted 2 ETH per 24h would
+    // otherwise let the owner spend 4; an owner-wide cap of 1.5 ETH holds the
+    // total down regardless of how many agents exist or how their individual
+    // caps are set.
+    let mut c = setup();
+    ctx(OWNER, pk(0), at_utc(12, 0));
+    c.register_agent(pk(2), "agent-two".to_string(), evm_policy());
+    c.set_aggregate_budget(aggregate_native(ONE_ETH + ONE_ETH / 2));
+
+    // Agent one spends 1 ETH: inside its own cap and inside the owner's.
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "a1", at_utc(12, 0)));
+
+    // Agent two's own cap would allow a further 1 ETH, but the keyring has
+    // only 0.5 ETH of owner-wide headroom left.
+    let out = transfer(&mut c, pk(2), ONE_ETH, "b1", at_utc(12, 1));
+    match out {
+        RequestOutcome::Refused { refusal, .. } => {
+            assert_eq!(refusal.code, RefusalCode::OwnerDailyCapExceeded);
+            assert_eq!(refusal.rule, "owner_rolling_24h_cap");
+            assert_eq!(refusal.limit, Some(U128(ONE_ETH + ONE_ETH / 2)));
+            assert_eq!(refusal.observed, Some(U128(2 * ONE_ETH)));
+        }
+        other => panic!("expected an owner-wide refusal, got {other:?}"),
+    }
+
+    // Exactly the remaining headroom is allowed.
+    ok_id(&transfer(&mut c, pk(2), ONE_ETH / 2, "b2", at_utc(12, 2)));
+    // And one base unit beyond it is not.
+    assert_eq!(
+        refusal(&transfer(&mut c, pk(2), 1, "b3", at_utc(12, 3))),
+        RefusalCode::OwnerDailyCapExceeded
+    );
+}
+
+#[test]
+fn the_agents_own_cap_is_reported_before_the_owner_wide_one() {
+    // Both rules must be violated at once, so the owner-wide cap is set equal
+    // to the agent's own cap: spending it exhausts both simultaneously. The
+    // narrower limit is the more useful one to report, and an agent should not
+    // learn about other agents' spending until its own limits are satisfied.
+    let mut c = setup();
+    ctx(OWNER, pk(0), at_utc(12, 0));
+    c.set_aggregate_budget(aggregate_native(2 * ONE_ETH));
+
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "a1", at_utc(12, 0)));
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "a2", at_utc(12, 1)));
+    // The agent is now at its own 2 ETH cap and at the owner-wide 2 ETH cap.
+    assert_eq!(
+        refusal(&transfer(&mut c, pk(1), 1, "a3", at_utc(12, 2))),
+        RefusalCode::DailyCapExceeded
+    );
+}
+
+#[test]
+fn revoking_an_agent_does_not_refund_the_owner_wide_budget() {
+    // The interaction that would otherwise make the cap bypassable: destroying
+    // an agent clears its own ledger, so if that also cleared the keyring
+    // total, revoke-and-re-register would reset the owner-wide budget.
+    let mut c = setup();
+    ctx(OWNER, pk(0), at_utc(12, 0));
+    c.set_aggregate_budget(aggregate_native(ONE_ETH));
+
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "a1", at_utc(12, 0)));
+
+    ctx(OWNER, pk(0), at_utc(12, 1));
+    c.revoke_agent(pk(1));
+    c.register_agent(pk(1), "agent-one".to_string(), evm_policy());
+
+    // The re-registered agent has a fresh per-agent ledger, but the keyring's
+    // owner-wide budget is already spent.
+    assert_eq!(
+        refusal(&transfer(&mut c, pk(1), 1, "a2", at_utc(12, 2))),
+        RefusalCode::OwnerDailyCapExceeded,
+        "the keyring total must survive revocation"
+    );
+}
+
+#[test]
+fn owner_wide_spend_ages_out_of_the_window_too() {
+    let mut c = setup();
+    ctx(OWNER, pk(0), at_utc(12, 0));
+    c.set_aggregate_budget(aggregate_native(ONE_ETH));
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "a1", at_utc(12, 0)));
+    assert_eq!(
+        refusal(&transfer(&mut c, pk(1), 1, "a2", at_utc(12, 1))),
+        RefusalCode::OwnerDailyCapExceeded
+    );
+    let next_day = at_utc(12, 0) + 25 * 3_600_000;
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "a3", next_day));
+}
+
+#[test]
+fn without_an_aggregate_budget_nothing_changes() {
+    // The feature is opt-in. An owner who wants per-agent limits only must see
+    // exactly the old behaviour.
+    let mut c = setup();
+    ctx(OWNER, pk(0), at_utc(12, 0));
+    c.register_agent(pk(2), "agent-two".to_string(), evm_policy());
+    assert!(c
+        .get_aggregate_budget(account(OWNER))
+        .unwrap()
+        .caps
+        .is_empty());
+
+    for pk_seed in [1u8, 2] {
+        ok_id(&transfer(
+            &mut c,
+            pk(pk_seed),
+            ONE_ETH,
+            &format!("x{pk_seed}a"),
+            at_utc(12, 0),
+        ));
+        ok_id(&transfer(
+            &mut c,
+            pk(pk_seed),
+            ONE_ETH,
+            &format!("x{pk_seed}b"),
+            at_utc(12, 1),
+        ));
+    }
+    // 4 ETH across two agents, as before.
+}
+
+#[test]
+#[should_panic(expected = "no keyring registered for this account")]
+fn a_non_owner_cannot_set_the_aggregate_budget() {
+    let mut c = setup();
+    ctx(STRANGER, pk(0), at_utc(12, 0));
+    c.set_aggregate_budget(aggregate_native(ONE_ETH));
+}
+
+#[test]
+#[should_panic(expected = "invalid aggregate budget")]
+fn an_aggregate_cap_of_zero_is_rejected() {
+    let mut c = setup();
+    ctx(OWNER, pk(0), at_utc(12, 0));
+    c.set_aggregate_budget(aggregate_native(0));
+}
+
+#[test]
+fn lowering_the_aggregate_cap_does_not_claw_back_committed_spend() {
+    // Existing reservations stand; the lower cap only refuses further spending.
+    let mut c = setup();
+    ctx(OWNER, pk(0), at_utc(12, 0));
+    c.set_aggregate_budget(aggregate_native(2 * ONE_ETH));
+    ok_id(&transfer(&mut c, pk(1), ONE_ETH, "a1", at_utc(12, 0)));
+
+    ctx(OWNER, pk(0), at_utc(12, 1));
+    c.set_aggregate_budget(aggregate_native(ONE_ETH / 2));
+
+    assert_eq!(
+        refusal(&transfer(&mut c, pk(1), 1, "a2", at_utc(12, 2))),
+        RefusalCode::OwnerDailyCapExceeded
+    );
+    // The already-signed request is untouched.
+    assert_eq!(c.get_request(1).unwrap().status, RequestStatus::Signed);
 }

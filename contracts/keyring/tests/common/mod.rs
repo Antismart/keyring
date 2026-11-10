@@ -5,8 +5,10 @@
 #![allow(dead_code)]
 
 use keyring_contract::evm::EvmParams;
-use keyring_contract::policy::{ChainPolicy, Policy, TimeWindow};
-use keyring_contract::types::{Chain, ChainParams};
+use keyring_contract::policy::{
+    AggregateBudget, AggregateCap, AssetPolicy, ChainPolicy, Policy, TimeWindow,
+};
+use keyring_contract::types::{Asset, Chain, ChainParams};
 use near_sdk::json_types::{U128, U64};
 use near_sdk::{AccountId, PublicKey};
 
@@ -35,17 +37,58 @@ pub const DEST_EVIL: &str = "0x9999999999999999999999999999999999999999";
 /// 1 ETH in wei, as a readable constant for the EVM caps.
 pub const ONE_ETH: u128 = 1_000_000_000_000_000_000;
 
-/// A Base Sepolia policy: 1 ETH per request, 2 ETH per 24h, 0.01 ETH fee cap.
+/// An ERC-20 token contract used by the token tests.
+pub const TOKEN: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+/// A second token, deliberately not in any policy.
+pub const TOKEN_OTHER: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+/// 1 unit of a 6-decimal token, for readable token caps.
+pub const ONE_USDC: u128 = 1_000_000;
+
+/// A Base Sepolia policy for native ETH: 1 ETH per request, 2 ETH per 24h,
+/// 0.01 ETH fee cap.
 pub fn evm_policy() -> Policy {
     Policy {
         chains: vec![ChainPolicy {
             chain: Chain::BaseSepolia,
-            max_per_request: U128(ONE_ETH),
-            max_per_24h: U128(2 * ONE_ETH),
             max_fee: U128(ONE_ETH / 100),
-            allowed_destinations: vec![DEST_A.to_string(), DEST_B.to_string()],
+            assets: vec![AssetPolicy {
+                asset: Asset::Native,
+                max_per_request: U128(ONE_ETH),
+                max_per_24h: U128(2 * ONE_ETH),
+                allowed_destinations: vec![DEST_A.to_string(), DEST_B.to_string()],
+            }],
         }],
         time_window: None,
+    }
+}
+
+/// The native policy plus an ERC-20 asset: 100 tokens per request, 200 per 24h.
+pub fn evm_policy_with_token() -> Policy {
+    let mut p = evm_policy();
+    p.chains[0].assets.push(AssetPolicy {
+        asset: Asset::Erc20 {
+            token: TOKEN.to_string(),
+        },
+        max_per_request: U128(100 * ONE_USDC),
+        max_per_24h: U128(200 * ONE_USDC),
+        allowed_destinations: vec![DEST_A.to_string()],
+    });
+    p
+}
+
+/// Shorthand for the native asset policy inside [`evm_policy`].
+pub fn native_limits(p: &mut Policy) -> &mut AssetPolicy {
+    &mut p.chains[0].assets[0]
+}
+
+/// An owner-wide cap on native ETH.
+pub fn aggregate_native(max_per_24h: u128) -> AggregateBudget {
+    AggregateBudget {
+        caps: vec![AggregateCap {
+            chain: Chain::BaseSepolia,
+            asset: Asset::Native,
+            max_per_24h: U128(max_per_24h),
+        }],
     }
 }
 
