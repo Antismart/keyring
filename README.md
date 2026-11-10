@@ -2,215 +2,263 @@
 
 **Policy-enforced wallet infrastructure for AI agents.**
 
-Keyring lets an owner give an AI agent bounded authority to spend, without giving
-it control of a private key. A NEAR smart contract holds the spending policy and
-decides every request. Only a request that passes policy may proceed to signing
-via NEAR Chain Signatures (MPC).
+Keyring lets an owner give an AI agent bounded authority to spend, without
+giving it control of a private key. A NEAR smart contract holds the spending
+policy, decides every request, and builds the transaction itself. Only a
+request that passes policy reaches NEAR Chain Signatures to be signed.
 
-> An AI agent can have financial autonomy without having unrestricted financial
-> authority.
+> An AI agent can have financial autonomy without having unrestricted
+> financial authority.
+
+Built for the NEAR hackathon, **AI Security & Defense** track.
 
 ---
 
-## Status: Gate F — the full agent workflow runs end to end
+## Verified on three chains
 
-This is early, honest-about-itself infrastructure. What exists today:
+Every transaction below was built inside the contract from policy-approved
+fields, signed by the live NEAR MPC network, and confirmed on its chain.
 
-| | |
-|---|---|
-| ✅ **Policy engine** | All seven MVP rules, 30 boundary tests |
-| ✅ **Access control** | Owner-only mutation, key-based agent identity, 28 tests |
-| ✅ **Real MPC signing** | Deployed to NEAR testnet; a real signature from `v1.signer-prod.testnet`, independently verified |
-| ✅ **Signing lifecycle** | `Created → Signing → Signed \| Failed`, private callback, 14 tests |
-| ✅ **EIP-1559 construction** | Built in-contract, matches **viem** byte for byte across 5 fixtures |
-| ✅ **Signature → address** | The MPC signature recovers to the derived Keyring address |
-| ✅ **Typed SDK + MCP surface** | 28 TypeScript tests |
-| ✅ **Payment on Base Sepolia** | [Included in block 56892318](https://sepolia.basescan.org/tx/0x03f49320c7aa0dcd2126f2a1ab247e0025b1aef8fa23955ab6bfc4d9bce43014), 21000 gas, status success |
-| ✅ **Refusals before signing** | Destination, per-request cap and fee cap, each with a structured reason |
-| ✅ **MCP server** | 5 tools over stdio, driven against the deployed contract |
-| ✅ **Agent demo** | [`evals/transcript.md`](evals/transcript.md) — payment, refusals, revocation, audit trail |
-| ✅ **ERC-20 transfers** | Calldata composed in-contract; [1 USDC transfer confirmed](https://sepolia.basescan.org/tx/0xef8d64d2c6af908d848053822c6a5fee6d106ada406afcf333d6c9933721ea46) in block 56963072 |
-| ✅ **Bitcoin testnet4** | BIP143 sighash matches **bitcoinjs-lib**; signed on testnet and verified |
-| ✅ **Owner-wide budgets** | A keyring-wide cap across all agents, enforced on testnet |
-| ✅ **Bitcoin spend on testnet4** | [Confirmed in block 160377](https://mempool.space/testnet4/tx/15061f1f6bb2fd892018621bb8523dff7ddef6bf0d672f01b56441eb225aaeee) — 50,000 sat paid, change returned, 500 sat fee |
+| What | Where | Result |
+|---|---|---|
+| Native ETH | Base Sepolia | [block 56931717](https://sepolia.basescan.org/tx/0x400f7537303bff49bef9110637ac985b6177ec8e618ab7bf2ac0158f1d37a8ee) — 0.0000005 ETH |
+| ERC-20 (USDC) | Base Sepolia | [block 56963072](https://sepolia.basescan.org/tx/0xef8d64d2c6af908d848053822c6a5fee6d106ada406afcf333d6c9933721ea46) — 1 USDC, `Transfer` event emitted |
+| Native BTC | Bitcoin testnet4 | [block 160377](https://mempool.space/testnet4/tx/15061f1f6bb2fd892018621bb8523dff7ddef6bf0d672f01b56441eb225aaeee) — 50,000 sat, change returned |
+
+Disallowed requests are refused **before** any signature is requested, with a
+machine-readable reason. Contract: `keyring-gated-1794298589.testnet` on NEAR
+testnet.
 
 **Nothing here has been audited, and nothing has touched mainnet or real
-value.** 119 tests pass, and the end-to-end path is real: an agent requested a
-payment, the contract checked it against policy, built the EIP-1559 transaction
-itself, had it signed by the live NEAR MPC network, and the transaction was
-included in a Base Sepolia block. Disallowed requests are refused before any
-signature is requested.
+value.** 192 tests pass. See [What is and is not
+verified](#what-is-and-is-not-verified) for the precise boundary.
 
-What that payment proves, and what it does not: Keyring moved testnet ETH under
-policy. It has not been audited, Bitcoin is unimplemented, and ERC-20 transfers
-are absent by design (the transaction has no calldata field at all).
+### Check it yourself
 
-A mock signature is never presented as a real one: `StoredSignature.mock` is
-persisted on every request, so the distinction survives into any dashboard,
-indexer or transcript that reads it.
-
-See `docs/development.md` for the full gate table.
-
-### Verify it yourself
+These scripts share no code with the contract. They refetch everything from
+chain and re-derive it independently.
 
 ```bash
-node scripts/verify-signature.mjs keyring-gatec-1794295861.testnet 1 testnet
+pnpm install && pnpm -r build
+
+# Re-verify a signature end to end. Rebuilds the transaction with viem or
+# bitcoinjs-lib, recomputes the signed hash, verifies the signature against the
+# MPC-derived key, and recovers that key from the signature.
+node scripts/verify-signature.mjs keyring-gated-1794298589.testnet 2   # native ETH
+node scripts/verify-signature.mjs keyring-gated-1794298589.testnet 6   # ERC-20
+node scripts/verify-signature.mjs keyring-gated-1794298589.testnet 5   # Bitcoin
+
+# Re-generate the reference fixtures and fail on any difference
+node scripts/gen-evm-fixtures.mjs --check
+node scripts/gen-btc-fixtures.mjs --check
+cargo test --test evm_transaction --test bitcoin_transaction
 ```
 
-This shares no code with the contract. It recomputes the signed payload from the
-policy-approved fields, fetches the derived key from the MPC signer, verifies
-the ECDSA signature, and recovers the public key from the signature to confirm
-it is the same key — 8 checks, all independent of the contract's own claims.
+## The idea
 
-## How it works
+The agent runtime is assumed hostile — prompt injection, leaked credentials,
+malicious tool use. So the agent never holds a key and never says what bytes to
+sign. It says only *what it wants to do*:
 
 ```
-AI agent runtime (untrusted — assume prompt injection)
-        │
-        ▼
-MCP server / TypeScript SDK (semi-trusted — no authority)
-        │  (chain, destination, amount, fee)
-        ▼
-NEAR Keyring contract  ◄── the policy enforcement boundary
-        │
-        ▼
-NEAR Chain Signatures MPC      ✅ verified on testnet
-        │
-        ▼
-Relayer → Base Sepolia / Bitcoin testnet4   [Gate D / E]
+request_transfer(chain, asset, destination, amount, params, idempotency_key)
 ```
 
-Everything above the contract is assumed hostile or unreliable. The design
-property that matters: **none of it can increase authorised spend or redirect a
-payment.** An agent's request carries four validated fields and nothing else —
-no calldata, no transaction preimage, no output list, no raw hash, no derivation
-path. The contract builds the transaction itself from values policy approved.
+That is the entire attack surface. There is **no** parameter for calldata, a
+transaction preimage, an output list, a raw hash, or a derivation path. The
+contract evaluates the request against policy and, if it passes, builds the
+transaction itself from the values policy approved.
 
-## Policy rules
+```
+AI agent runtime                      untrusted — assume prompt injection
+        │
+        ▼
+MCP server / TypeScript SDK           semi-trusted — holds no authority
+        │
+        ▼
+NEAR Keyring contract                 ◄── the policy enforcement boundary
+        │
+        ▼
+NEAR Chain Signatures (MPC)           keys exist only as threshold shares
+        │
+        ▼
+Relayer → Base Sepolia / Bitcoin testnet4
+```
 
-Per agent, per chain, in integer base units (wei / satoshi — never floating
-point):
+Everything above the contract can cause a transaction to fail. None of it can
+increase authorised spend or redirect a payment.
 
-- **Enabled / disabled** — the owner's kill switch
-- **Chain allowlist** — the absence of a chain policy is the denial
-- **Destination allowlist** — an empty list permits nobody, never anybody
-- **Asset allowlist** — per chain. Permission to move a token is not permission
-  to send native value, or the reverse, and each asset has its own destination
-  allowlist
-- **Per-request cap** — per asset, since amounts are in the asset's own base
-  units
-- **Rolling 24-hour cap** — per asset; reserved at authorisation, checked
-  against the projected total
-- **Owner-wide 24-hour cap** *(optional)* — bounds the total across **every**
-  agent in the keyring, which per-agent caps cannot do: an owner running N
-  agents each capped at C is otherwise exposed to N x C
-- **Time window** — UTC minutes of day, including windows that wrap midnight
-- **Fee cap** — checked against `gas_limit * max_fee_per_gas`, which the
-  contract derives. There is no caller-supplied fee field.
+The MPC signer binds every derived key to its own caller, so only this contract
+can obtain signatures for Keyring's addresses. That was verified rather than
+assumed: asking the signer for the same derivation path with the agent's
+account as caller returns a **different** key, controlling nothing.
 
-Evaluation order is fixed, so a request breaking several rules always reports the
-same one. Refusals are structured — code, rule, human-readable message,
-configured limit, observed value:
+## Policy
+
+Amounts are integers in each asset's own base units — wei, satoshi, token
+units. No floating point anywhere in the contract.
+
+| Rule | |
+|---|---|
+| **Enabled / disabled** | The owner's kill switch |
+| **Chain allowlist** | The absence of a chain policy is the denial |
+| **Asset allowlist** | Per chain. Permission to move a token is not permission to send native value, or the reverse |
+| **Destination allowlist** | Per asset. An empty list permits nobody, never anybody |
+| **Per-request cap** | Per asset |
+| **Rolling 24-hour cap** | Per asset, reserved at authorisation |
+| **Owner-wide 24-hour cap** | *Optional.* Bounds the total across **every** agent in the keyring |
+| **Time window** | UTC minutes of day, including windows that wrap midnight |
+| **Fee cap** | Checked against the fee the transaction really pays |
+
+Two of these deserve a note.
+
+**The fee is derived, never declared.** An earlier design let the caller pass a
+`fee` that policy checked — unsound, because an EIP-1559 transaction's real
+ceiling is `gas_limit × max_fee_per_gas`, which the caller also controlled. The
+caller now supplies only the gas numbers that must enter the transaction
+anyway, and the contract computes the fee from exactly those. On Bitcoin the
+fee is `inputs − outputs`, computed from the same input amount BIP143 binds the
+signature to.
+
+**Per-agent caps do not bound a keyring.** An owner running N agents each
+capped at C is exposed to N × C. `set_aggregate_budget` caps the total across
+all agents; it is opt-in, and nothing sets it by default.
+
+### Refusals are a feature
+
+Evaluation order is fixed, so a request breaking several rules always reports
+the same one. Every refusal carries a stable code, the rule, the configured
+limit and the observed value:
 
 ```json
 {
   "outcome": "refused",
-  "request_id": 7,
+  "request_id": 3,
   "refusal": {
-    "code": "daily_cap_exceeded",
-    "rule": "rolling_24h_cap",
-    "message": "this transfer would bring 24h spend to 2000000000000000001 wei, over the cap of 2000000000000000000 wei (2000000000000000000 already committed)",
-    "limit": "2000000000000000000",
-    "observed": "2000000000000000001"
+    "code": "owner_daily_cap_exceeded",
+    "rule": "owner_rolling_24h_cap",
+    "message": "this would bring the keyring's total 24h spend to 2000000000000 wei, over the owner-wide cap of 1500000000000 wei (1000000000000 already committed across all agents)",
+    "limit": "1500000000000",
+    "observed": "2000000000000"
   }
 }
 ```
 
-The refusal is part of the product, not an error to hide.
+That one is real output from testnet: a request the agent's own cap allowed,
+refused by the keyring-wide cap.
+
+## Chains and assets
+
+| | Construction | Verified against | On chain |
+|---|---|---|---|
+| Base Sepolia — native | EIP-1559 built in-contract | **viem**, 7 fixtures | ✅ confirmed |
+| Base Sepolia — ERC-20 | `transfer` calldata composed in-contract | **viem** | ✅ confirmed |
+| Bitcoin testnet4 — P2WPKH | BIP143 sighash built in-contract | **bitcoinjs-lib**, 3 spends + 4 addresses | ✅ confirmed |
+
+The cross-checks target the cases that actually break: RLP's zero encoding (the
+empty string, not `0x00`), the `0x7f`/`0x80` boundary, payloads over 55 bytes,
+and for Bitcoin the P2WPKH `scriptCode` — which is the P2PKH script over the
+same key hash, not the witness program.
+
+**Bitcoin scope:** one input, native segwit, one payment plus change to
+Keyring's own address. Multiple inputs are unsupported rather than
+half-supported. Bech32m (Taproot) destinations are refused, since Keyring
+cannot construct those spends.
+
+**ERC-20 scope:** the contract does not read a token's decimals or balance.
+Policy bounds what may be *authorised*, not whether the token will honour it.
 
 ## Quick start
 
-Requires Rust 1.99, `cargo-near` **≥ 0.23.0** (0.19.0 cannot build this — see
-`docs/security-decisions.md` §9), Node ≥ 22 and pnpm.
+Requires Rust 1.99, `cargo-near` **≥ 0.23.0**, Node ≥ 22 and pnpm.
 
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install --locked cargo-near --version 0.23.0
 pnpm install
 
-cargo test --workspace     # 58 contract tests
-pnpm -r test               # 15 TypeScript tests
+cargo test --workspace    # 149 contract tests
+pnpm -r test              # 43 TypeScript tests
 
 cd contracts/keyring && cargo near build non-reproducible-wasm
 ```
+
+`cargo-near` 0.19.0 **cannot** build this: it rejects wasm from rustc ≥ 1.87
+while `near-sdk` 5.30.1 requires ≥ 1.95. If you see "please downgrade to
+1.86.0", your `cargo-near` is too old (`docs/security-decisions.md` §9).
 
 `cargo build` at the workspace root fails by design — `near-sdk` requires the
 wasm target. Use `cargo check --target wasm32-unknown-unknown`.
 
 ## Contract interface
 
-**Owner only** — authority derived from `predecessor_account_id()`, never a
-parameter:
+**Owner only.** Authority comes from `predecessor_account_id()`, never a
+parameter, so no caller can act for another account.
 
 | Method | |
 |---|---|
 | `register_keyring()` | Caller becomes an owner |
 | `register_agent(public_key, label, policy)` | Register an agent key |
 | `set_policy(public_key, policy)` | Replace a policy |
+| `set_aggregate_budget(budget)` | Keyring-wide 24h caps across all agents |
+| `set_agent_btc_pubkey(public_key, compressed_hex)` | Register the agent's Bitcoin key, so the contract can build change outputs |
 | `set_agent_enabled(public_key, enabled)` | Kill switch |
 | `revoke_agent(public_key)` | Remove an agent |
-| `set_aggregate_budget(budget)` | Keyring-wide 24h caps across all agents |
-| `set_agent_btc_pubkey(public_key, compressed_hex)` | Register the agent's Bitcoin key so the contract can build change outputs |
 
-**Agent** — identity from `env::signer_account_pk()`, never a parameter:
+**Agent.** Identity comes from `env::signer_account_pk()` — the key that
+actually signed — never a parameter, so an agent cannot act as another.
 
 | Method | |
 |---|---|
 | `request_transfer(chain, asset, destination, amount, params, idempotency_key)` | Returns `Signed`, `Refused`, `Duplicate` or `SigningFailed` |
-| `on_signed(...)` | Private callback. Rejects any predecessor but the contract itself. |
+| `on_signed(...)` | Private callback; rejects any predecessor but the contract itself |
 
-Attach about 300 TGas to `request_transfer`: the contract forwards 100 TGas to
-the signer and reserves 20 TGas for its callback. The 1 yoctoNEAR signer deposit
-is attached by the contract from its own balance, so `request_transfer` is not
-payable and an agent cannot influence it.
+Attach ~300 TGas to `request_transfer`: 100 TGas is forwarded to the signer and
+20 reserved for the callback. The signer's 1 yoctoNEAR deposit is attached by
+the contract from its own balance, so the method is not payable and an agent
+cannot influence it.
 
-**Views** — no mutation, no budget consumed:
+**Views.** No mutation, no budget consumed:
 
-`simulate_transfer`, `get_keyring`, `get_agent`, `get_policy`, `get_request`,
-`get_history`, `get_derivation_path`, `get_signer_backend`, `is_mock_signer`.
+`simulate_transfer`, `get_keyring`, `get_agent`, `get_policy`,
+`get_aggregate_budget`, `get_request`, `get_history`, `get_derivation_path`,
+`get_signer_backend`, `is_mock_signer`.
 
-## MCP tools
+`is_mock_signer` exists so no demo can pass mock output off as real. The
+distinction is also stored on every request, so it survives into anything that
+reads the record.
 
-Exactly five, and the omissions are deliberate: there is no tool to register an
-agent, change a policy, enable an agent, revoke an agent or sign arbitrary data.
-A tool the agent runtime cannot call is the only kind it cannot be tricked into
-calling. A test asserts the exposed set, so widening it is a visible change.
+## MCP server
 
-| Tool | |
+Five tools, and the omissions are the design. There is no tool to register an
+agent, change a policy, enable or revoke one, set the aggregate budget, or sign
+arbitrary data. A tool the runtime cannot call is the only kind it cannot be
+tricked into calling — and a test asserts the exposed set, so widening it is a
+visible change.
+
+| Tool | Read-only |
 |---|---|
-| `get_addresses` | Derivation path and the derived address Keyring pays from |
-| `get_policy` | Caps, allowlists, time window, enabled state |
-| `simulate_transfer` | Would this be allowed, and if not which rule refuses it |
-| `request_transfer` | Request a payment within policy |
-| `get_history` | Past requests with the reason for every refusal |
+| `get_addresses` | ✅ |
+| `get_policy` | ✅ |
+| `simulate_transfer` | ✅ |
+| `get_history` | ✅ |
+| `request_transfer` | — |
 
-Four are read-only. `request_transfer` is registered **only** when an agent key
-is configured, so a read-only deployment does not advertise a spending tool at
-all.
-
-### Running it
+`request_transfer` is registered **only** when an agent key is configured, so a
+read-only deployment does not advertise a spending tool at all.
 
 ```bash
 pnpm install && pnpm -r build
 
 export KEYRING_CONTRACT_ID=keyring-gated-1794298589.testnet
 export KEYRING_OWNER_ID=$KEYRING_CONTRACT_ID
-export AGENT_ACCOUNT_ID=<agent account>   # omit to run read-only
+export AGENT_ACCOUNT_ID=<agent account>   # omit both to run read-only
 export AGENT_PRIVATE_KEY=<agent key>
+
 node packages/mcp-server/dist/bin.js
 ```
 
-Add it to an MCP client with:
+In an MCP client:
 
 ```json
 {
@@ -230,78 +278,80 @@ Add it to an MCP client with:
 
 ## The demo
 
-[`evals/transcript.md`](evals/transcript.md) is a real run: an agent discovers
-its limits, simulates, makes a payment that lands on Base Sepolia, is refused
-three different ways, gets revoked by its owner, and then cannot transact.
+[`evals/transcript.md`](evals/transcript.md) is a real recorded run against the
+deployed contract: the agent discovers its address and limits, simulates, makes
+a payment that lands on Base Sepolia, is refused three different ways, is
+revoked by its owner, and then cannot transact.
 
 ```bash
-node scripts/demo-agent.mjs      # regenerates the transcript
+node scripts/demo-agent.mjs    # regenerates the transcript
 ```
 
-The step worth looking at is the revocation. It happens through the SDK with the
-owner's key, because there is no MCP tool for it — the agent cannot revoke
-itself, re-enable itself or change its own caps, since no such tool exists for
+> **Note:** the committed transcript covers native ETH only. It predates the
+> ERC-20, Bitcoin and owner-wide-budget work, so it shows less than the system
+> now does. Re-running the script regenerates it.
+
+The step worth reading is the revocation. It goes through the SDK with the
+owner's key, because **there is no MCP tool for it** — the agent cannot revoke
+itself, re-enable itself or raise its own caps, since no such tool exists for
 it to be manipulated into calling.
 
-## Chains and assets
+## What is and is not verified
 
-| | |
+| Claim | Evidence |
 |---|---|
-| Base Sepolia — native ETH | Built, verified against viem, **payment landed on chain** |
-| Base Sepolia — ERC-20 | Built, verified against viem, **transfer confirmed on chain** |
-| Bitcoin testnet4 — P2WPKH | Built, verified against bitcoinjs-lib, **spend confirmed in a block** |
-
-Bitcoin is one input, native segwit, one payment plus change to the Keyring's
-own address. Multiple inputs are not supported rather than half-supported.
-Bech32m (Taproot) addresses are refused, since Keyring cannot construct those
-spends.
-
-The Bitcoin address for the reference deployment is
-`tb1qthnksfdpen20ka34h9dhapdgttwxcdr4z4nhgm`.
-
-Worth stating precisely: Bitcoin nodes validate scripts and signatures in full
-before admitting a transaction, so correctness was established the moment the
-network accepted it; the block that followed added durability. The address
-holds the change and can spend again.
+| Policy rules enforced at their boundaries | 50 tests, each rule at its cap and one base unit past it |
+| Owner and agent access control | 38 tests in the near-sdk VM |
+| Signing lifecycle and callback access control | 16 tests |
+| EVM construction | 22 tests, matched against viem |
+| Bitcoin construction | 23 tests, matched against bitcoinjs-lib |
+| SDK and MCP surface | 43 TypeScript tests |
+| Real MPC signing | Verified on NEAR testnet, signatures checked independently |
+| Payments on two chains | Confirmed in blocks (links above) |
+| **Audit** | **None.** No external review of any kind |
+| **Mainnet** | **Never.** Testnet accounts and valueless assets only |
+| **Multi-input Bitcoin** | Not implemented |
+| **Human approval queues, TEE attestation, price oracles** | Out of scope by design |
 
 ## Known limitations
 
-Read `docs/threat-model.md` for the full list. The ones that matter most:
+The full list, with reasoning, is in [`docs/threat-model.md`](docs/threat-model.md).
+The ones that matter most:
 
-1. **A compromised agent key can still spend the remaining 24-hour budget** to an
-   allowlisted destination. Keyring bounds blast radius; it does not eliminate it.
-2. **Owner-wide budgets are opt-in.** Per-agent caps bound one agent. Unless
-   the owner sets a keyring-wide cap, N agents each capped at C still expose
-   the owner to N x C — a policy reading "2 ETH per 24h" limits that *agent*.
-   `set_aggregate_budget` bounds the total; nothing sets it by default.
-3. **Bitcoin is one input, native segwit only.** Multiple inputs are not
-   supported rather than half-supported, and bech32m (Taproot) destinations are
-   refused.
-4. **Replay protection is bounded** at 32 idempotency keys per agent. The uncaught
-   case is a second within-policy payment, never an over-limit one.
-5. **A failed broadcast still consumes budget** until the window rolls. Deliberate:
-   refunding on a relayer's report would let a hostile relayer mint spend capacity.
-6. **Transaction construction is proven by tests** against viem and
-   bitcoinjs-lib, rather than resting on the absence of a dangerous parameter.
-7. **A failed signing keeps its budget reservation.** The contract cannot prove
-   the MPC network never assembled a signature, so releasing budget could
-   authorise the same spend twice. A failed signing therefore consumes budget
-   until the window rolls.
-8. **The MPC wire types are mirrored, not imported.** The official
-   `near-mpc-sdk` 0.0.1 does not compile against near-sdk 5.30.1. The schemas
-   were read from the deployed signer's own ABI and are pinned by tests, but
-   must be re-checked when the signer is upgraded.
+1. **A compromised agent key can still spend the remaining 24-hour budget** to
+   an allowlisted destination. Keyring bounds blast radius; it does not
+   eliminate it. Allowlisting only addresses you control or genuinely intend to
+   pay is what makes that bound meaningful.
+2. **Owner-wide budgets are opt-in.** Without one, N agents each capped at C
+   expose the owner to N × C.
+3. **A failed broadcast still consumes budget** until the window rolls.
+   Deliberate: refunding on a relayer's report would let a hostile relayer mint
+   spend capacity by claiming failure.
+4. **A failed signing keeps its reservation.** The contract cannot prove the
+   MPC network never assembled a signature, so releasing budget could authorise
+   the same spend twice.
+5. **Replay protection is bounded** at 32 idempotency keys per agent. The
+   uncaught case is a second within-policy payment, never an over-limit one.
+6. **The Bitcoin change key is registered by the owner.** The contract cannot
+   derive it synchronously. A wrong value sends change to an address Keyring
+   does not control, which is why the SDK derives it rather than asking anyone
+   to transcribe it.
+7. **The MPC wire types are mirrored, not imported.** `near-mpc-sdk` 0.0.1 does
+   not compile against `near-sdk` 5.30.1. The schemas were read from the
+   deployed signer's own ABI and are pinned by tests, but must be re-checked
+   when the signer is upgraded.
 
 ## Documentation
 
 | | |
 |---|---|
-| `docs/architecture.md` | Components, request flow, state layout, events |
-| `docs/threat-model.md` | Assets, boundaries, 14 threats, residual risks |
-| `docs/security-decisions.md` | 13 decisions with reasoning |
-| `docs/development.md` | Setup, verified commands, gate status |
-| `CLAUDE.md` | The project contract governing this repository |
+| [`docs/architecture.md`](docs/architecture.md) | Components, request flow, state layout, events |
+| [`docs/threat-model.md`](docs/threat-model.md) | Assets, trust boundaries, 14 threats, residual risks |
+| [`docs/security-decisions.md`](docs/security-decisions.md) | 33 decisions with reasoning, including superseded ones |
+| [`docs/development.md`](docs/development.md) | Setup, verified commands, gate status |
+| [`evals/`](evals/) | Recorded agent demo |
+| [`CLAUDE.md`](CLAUDE.md) | The engineering contract governing this repository |
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [`LICENSE`](LICENSE).
