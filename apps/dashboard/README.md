@@ -61,6 +61,23 @@ libraries beneath it — most of the bundle — and reading a keyring needs none
 it. The initial load is about 47 kB; the 760 kB wallet chunk arrives only when
 you connect, or on load if a previous session is remembered.
 
+## Checking how it looks
+
+There is no browser automation in this environment, so the console is checked
+headlessly:
+
+```bash
+pnpm --filter @keyring/dashboard dev
+node scripts/screenshot-dashboard.mjs http://localhost:8787/?account=<id> ./shots
+```
+
+It captures light, dark and phone widths plus every tab, and reports console
+errors and horizontal overflow. It earned its place on the first run by
+exposing a layout bug that stretched the grid rows to fill the viewport, and
+by showing that address resolution was slow enough to look broken.
+
+For a recording, see [`docs/demo-runbook.md`](../../docs/demo-runbook.md).
+
 ## Known gaps
 
 - **MyNearWallet only.** Meteor's SDK imports `utils` from `near-api-js`, which

@@ -56,16 +56,56 @@ export interface DerivedAddress {
   compressed: string | null;
 }
 
+/**
+ * Cache of resolved keys.
+ *
+ * A derived key is a pure function of (signer root key, predecessor, path), so
+ * it never changes for a given path and is safe to remember. The signer takes
+ * seconds to answer, which is long enough to look broken, so the answer is
+ * kept in memory for the session and in `localStorage` across reloads.
+ *
+ * Only public keys are stored. Storage can be blocked or cleared, so every
+ * access is guarded and a miss simply costs the round trip.
+ */
+const memo = new Map<string, string>();
+const STORAGE_PREFIX = "keyring:derived:";
+
+function cached(key: string): string | null {
+  const hit = memo.get(key);
+  if (hit) return hit;
+  try {
+    const stored = localStorage.getItem(STORAGE_PREFIX + key);
+    if (stored) memo.set(key, stored);
+    return stored;
+  } catch {
+    return null;
+  }
+}
+
+function remember(key: string, publicKey: string): void {
+  memo.set(key, publicKey);
+  try {
+    localStorage.setItem(STORAGE_PREFIX + key, publicKey);
+  } catch {
+    // A full or blocked store only costs us the round trip next time.
+  }
+}
+
 export async function derivedAddress(
   contractId: string,
   path: string,
   chain: string,
 ): Promise<DerivedAddress> {
-  const publicKey = await view<string>(MPC_SIGNER, "derived_public_key", {
-    path,
-    predecessor: contractId,
-    domain_id: ECDSA_DOMAIN_ID,
-  });
+  const cacheKey = `${contractId}|${path}`;
+  let publicKey = cached(cacheKey);
+  if (!publicKey) {
+    publicKey = await view<string>(MPC_SIGNER, "derived_public_key", {
+      path,
+      predecessor: contractId,
+      domain_id: ECDSA_DOMAIN_ID,
+    });
+    remember(cacheKey, publicKey);
+  }
   const isBtc = chain === "bitcoin_testnet4";
   return {
     publicKey,

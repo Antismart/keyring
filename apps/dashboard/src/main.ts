@@ -72,7 +72,11 @@ interface State {
 }
 
 const state: State = {
-  account: new URLSearchParams(location.search).get("account")?.trim() || DEFAULT_ACCOUNT,
+  // A trailing dot is easy to pick up when an account id ends a sentence, and
+  // it makes the id invalid, so strip it here as well as on the input.
+  account:
+    new URLSearchParams(location.search).get("account")?.trim().replace(/\.$/, "") ||
+    DEFAULT_ACCOUNT,
   keyring: null,
   requests: [],
   signer: "mock",
@@ -107,10 +111,10 @@ function shell(body: string): string {
     <nav class="flex-1 p-2 grid gap-1 content-start">${nav}</nav>
     <div class="p-3 text-[11px]" style="border-top:1px solid var(--rail-line);color:#64748b">
       <div class="label" style="color:#64748b">Contract</div>
-      <div class="mono break-all" style="color:#cbd5e1">${esc(state.account)}</div>
-      <div class="mono break-all mt-1">${
+      <div class="mono truncate" style="color:#cbd5e1" title="${esc(state.account)}">${esc(state.account)}</div>
+      <div class="mono truncate mt-1" title="${
         state.signer === "mock" ? "mock signer" : esc(state.signer.mpc.contract_id)
-      }</div>
+      }">${state.signer === "mock" ? "mock signer" : esc(state.signer.mpc.contract_id)}</div>
     </div>
   </aside>
 
@@ -127,7 +131,7 @@ function shell(body: string): string {
     </header>
 
     <main class="flex-1 grid gap-5 w-full max-w-[1500px] mx-auto"
-          style="padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:24px">
+          style="align-content:start;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:24px">
       ${state.error ? `<div class="card p-4" style="background:var(--danger-soft);border-color:color-mix(in srgb,var(--danger) 40%,transparent)">
         <div class="font-semibold text-[var(--danger)]">Could not load ${esc(state.account)}</div>
         <div class="text-xs mt-1">${esc(state.error)}</div></div>` : ""}
@@ -187,6 +191,10 @@ async function load(): Promise<void> {
       limit: 100,
     });
     if (hasWalletSession()) await restoreWallet();
+
+    // Warm the address cache now rather than when the Agents tab opens: the
+    // signer takes seconds per key, and the tab should be ready on arrival.
+    void prefetchAddresses();
   } catch (err) {
     state.keyring = null;
     state.error = (err as Error).message;
@@ -194,6 +202,29 @@ async function load(): Promise<void> {
     state.loading = false;
     render();
   }
+}
+
+/** Resolves every agent address in the background, filling the cache. */
+async function prefetchAddresses(): Promise<void> {
+  const keyring = state.keyring;
+  if (!keyring) return;
+  await Promise.all(
+    keyring.agents.flatMap((agent) =>
+      agent.policy.chains.map(async (cp) => {
+        try {
+          const path = await view<string>(state.account, "get_derivation_path", {
+            owner: keyring.owner,
+            public_key: agent.public_key,
+            chain: cp.chain,
+          });
+          await derivedAddress(state.account, path, cp.chain);
+        } catch {
+          // The Agents tab reports the failure where it is visible.
+        }
+      }),
+    ),
+  );
+  if (state.tab === "agents") void hydrateAddresses(state.account, keyring);
 }
 
 /** Restores a remembered wallet session and follows later changes. */

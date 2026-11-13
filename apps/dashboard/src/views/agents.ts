@@ -54,13 +54,16 @@ function card(keyring: Keyring, agent: Agent, now = Date.now()): string {
     </div>
 
     <div class="addresses grid gap-2" data-for="${esc(agent.public_key)}">
-      <div class="text-xs faint">Resolving derived addresses…</div>
+      <div class="sunken p-3 rounded-lg grid gap-2" aria-busy="true">
+        <div class="label faint">Deriving addresses from the MPC signer…</div>
+        <div class="bar"><span style="width:40%;animation:pulse 1.2s ease-in-out infinite"></span></div>
+      </div>
     </div>
 
     <div class="grid gap-4">${agent.policy.chains.map((cp) => chainBlock(cp, agent, now)).join("")}</div>
 
     <div class="flex flex-wrap gap-2 pt-1">
-      <button class="btn btn-danger" data-action="${agent.enabled ? "disable" : "enable"}"
+      <button class="btn" data-action="${agent.enabled ? "disable" : "enable"}"
               data-key="${esc(agent.public_key)}">
         ${agent.enabled ? "Disable" : "Re-enable"}
       </button>
@@ -119,41 +122,48 @@ function chainBlock(cp: ChainPolicy, agent: Agent, now: number): string {
 /**
  * Fills in derived addresses after the cards render.
  *
- * Each needs a round trip to the MPC signer, so the cards appear immediately
- * and the addresses arrive behind them rather than holding up the whole page.
+ * Each address costs a round trip to the MPC signer, which is slow enough to
+ * be noticeable, so the cards paint immediately and every lookup runs in
+ * parallel behind them. Sequentially this took long enough to look broken.
  */
 export async function hydrateAddresses(contractId: string, keyring: Keyring): Promise<void> {
-  for (const agent of keyring.agents) {
-    const box = document.querySelector<HTMLElement>(`.addresses[data-for="${CSS.escape(agent.public_key)}"]`);
-    if (!box) continue;
-    const parts: string[] = [];
-    for (const cp of agent.policy.chains) {
-      try {
-        const path = await view<string>(contractId, "get_derivation_path", {
-          owner: keyring.owner,
-          public_key: agent.public_key,
-          chain: cp.chain,
-        });
-        const d = await derivedAddress(contractId, path, cp.chain);
-        const needsKey = cp.chain === "bitcoin_testnet4";
-        const registered = needsKey && agent.btc_pubkey === d.compressed;
-        const note = !needsKey
-          ? ""
-          : registered
-            ? `<span class="pill pill-ok">change key registered</span>`
-            : `<span class="pill pill-danger">change key not registered — spends are refused</span>`;
-        parts.push(`<div class="sunken p-3 rounded-lg grid gap-1">
-          <div class="flex items-center justify-between gap-2 flex-wrap">
-            <span class="label">${esc(CHAINS[cp.chain]?.label ?? cp.chain)} address</span>${note}
-          </div>
-          <div class="mono text-xs break-all">${esc(d.address)}</div>
-          <div class="mono text-[10px] faint break-all">path ${esc(path)}</div>
-        </div>`);
-      } catch (err) {
-        parts.push(`<div class="sunken p-3 rounded-lg text-xs text-[var(--danger)]">
-          Could not derive the ${esc(cp.chain)} address: ${esc((err as Error).message)}</div>`);
-      }
-    }
-    box.innerHTML = parts.join("");
-  }
+  await Promise.all(
+    keyring.agents.map(async (agent) => {
+      const box = document.querySelector<HTMLElement>(
+        `.addresses[data-for="${CSS.escape(agent.public_key)}"]`,
+      );
+      if (!box) return;
+
+      const blocks = await Promise.all(
+        agent.policy.chains.map(async (cp) => {
+          try {
+            const path = await view<string>(contractId, "get_derivation_path", {
+              owner: keyring.owner,
+              public_key: agent.public_key,
+              chain: cp.chain,
+            });
+            const d = await derivedAddress(contractId, path, cp.chain);
+            const needsKey = cp.chain === "bitcoin_testnet4";
+            const registered = needsKey && agent.btc_pubkey === d.compressed;
+            const note = !needsKey
+              ? ""
+              : registered
+                ? `<span class="pill pill-ok">change key registered</span>`
+                : `<span class="pill pill-danger">change key not registered — spends are refused</span>`;
+            return `<div class="sunken p-3 rounded-lg grid gap-1">
+              <div class="flex items-center justify-between gap-2 flex-wrap">
+                <span class="label">${esc(CHAINS[cp.chain]?.label ?? cp.chain)} address</span>${note}
+              </div>
+              <div class="mono text-xs break-all">${esc(d.address)}</div>
+              <div class="mono text-[10px] faint break-all">path ${esc(path)}</div>
+            </div>`;
+          } catch (err) {
+            return `<div class="sunken p-3 rounded-lg text-xs text-[var(--danger)]">
+              Could not derive the ${esc(cp.chain)} address: ${esc((err as Error).message)}</div>`;
+          }
+        }),
+      );
+      box.innerHTML = blocks.join("");
+    }),
+  );
 }

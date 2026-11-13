@@ -153,3 +153,6 @@ table.data tr:hover td { background: color-mix(in srgb, var(--surface-sunken) 60
   background: #1e293b; color: #f1f5f9; font-weight: 600;
   box-shadow: inset 2px 0 0 var(--accent);
 }
+
+@keyframes pulse { 0%,100% { opacity: 0.35 } 50% { opacity: 0.9 } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important } }
