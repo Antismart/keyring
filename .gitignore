@@ -25,3 +25,6 @@ neardev/
 .DS_Store
 .idea/
 .vscode/
+
+# Recorded demo output — regenerate with scripts/record-demo.mjs
+demo/

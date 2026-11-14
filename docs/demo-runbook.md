@@ -102,6 +102,61 @@ chain data alone: it rebuilds the transaction with viem or bitcoinjs-lib,
 checks the signature against the MPC-derived key, and recovers that key from
 the signature.
 
+## Recording it without a camera operator
+
+The walkthrough records itself, narration included.
+
+```bash
+pnpm --filter @keyring/dashboard dev     # the console under test
+
+node scripts/narrate.mjs demo                   # a voice clip per line, measured
+node scripts/record-demo.mjs \
+  "http://localhost:8787/?account=keyring-gated-1794298589.testnet" demo
+node scripts/mix-demo.mjs demo                  # picture + voice -> MP4
+```
+
+The narrator uses ElevenLabs when `ELEVENLABS_API_KEY` is set (in the
+environment or in `.env`, which it reads if present) and the macOS
+`say` voice when it is not, so the pipeline runs with no key and no network at
+all — only the sound changes. It calls ElevenLabs through the official SDK
+(`@elevenlabs/elevenlabs-js`, a root dev dependency) with the pre-made voice
+George on `eleven_v4`, and stitches each clip to its neighbours so the tone
+holds across beats. `DEMO_VOICE_ID` picks another voice and `ELEVENLABS_MODEL`
+another model. To get a key without copying one by hand, run
+`npx -y @elevenlabs/cli@latest onboard init` and pass `--env-path .env` to the
+`connect` step it prints.
+
+Lines containing acronyms carry a second spelling: `say` needs *M P C* spaced
+out or it slurs, while a neural voice reads the spaced form as stilted. Both
+live beside each other in `scripts/demo-script.mjs`.
+
+| | |
+|---|---|
+| `demo/keyring-demo.mp4` | the deliverable — 1440x900, H.264 and AAC, about five minutes |
+| `demo/keyring-demo.webm` | the silent capture, if you would rather narrate it yourself |
+| `demo/narration.wav` | the voice track alone, already aligned to the picture |
+| `demo/cues.md` | every line, when it is spoken, and the caption shown with it |
+| `demo/frames/` | a still per beat, usable as submission screenshots |
+
+The narration lives in `scripts/demo-script.mjs` — `say` (or `el`) is what is
+spoken, `cap` is what appears on screen. Edit a line there, re-run the three commands,
+and the picture is re-cut to the new timing: each beat is held for exactly as
+long as its clip runs, so nothing is aligned by hand.
+
+With the `say` fallback, `DEMO_VOICE` and `DEMO_RATE` pick the macOS voice and
+words per minute (`say -v '?'` lists them). That fallback is the only
+macOS-specific piece; the
+recorder falls back to a reading estimate when no clips are present, so the
+picture can be shot anywhere and narrated elsewhere.
+
+Two things in the video are produced by the run that made it rather than
+quoted from an earlier one: every figure in the console is read from the
+deployed contract, and the verifier panel near the end is live output from
+`scripts/verify-signature.mjs`. Re-run the recording after changing contract
+state rather than editing the video.
+
+`demo/` is gitignored — the MP4 is roughly 15 MB.
+
 ## If something goes wrong
 
 **Addresses stuck on "Deriving addresses"** — the signer is slow. They cache

@@ -20,6 +20,7 @@
     "verify:signature": "node scripts/verify-signature.mjs"
   },
   "devDependencies": {
+    "@elevenlabs/elevenlabs-js": "2.78.0",
     "@noble/curves": "1.9.7",
     "@noble/hashes": "1.8.0",
     "@scure/base": "1.2.6",
