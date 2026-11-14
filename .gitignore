@@ -28,3 +28,4 @@ neardev/
 
 # Recorded demo output — regenerate with scripts/record-demo.mjs
 demo/
+.vercel

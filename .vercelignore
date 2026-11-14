@@ -1,0 +1,21 @@
+# Only the dashboard and the workspace packages it builds from are uploaded.
+# Secrets never leave this machine.
+.env
+.env.*
+!.env.example
+.vercel
+node_modules
+**/node_modules
+target
+**/target
+contracts
+demo
+evals
+**/dist
+**/dist-verify
+*.mp4
+*.webm
+*.wav
+# Build info without its dist/ makes `tsc -b` skip emitting.
+*.tsbuildinfo
+**/*.tsbuildinfo
