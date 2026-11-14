@@ -1,71 +1,79 @@
 @import "tailwindcss";
 
-/* Layout: fixed dark rail for navigation, light working surface beside it.
-   The rail stays dark in both themes — it is chrome, not content. */
+/* Layout: fixed dark rail for navigation, working surface beside it.
+   The rail stays dark in both themes — it is chrome, not content.
+
+   Token values come from the Framer file "Keyring — Owner Console"
+   (docs/console-design-brief.md). Each colour style there is named after the
+   custom property it sets here. */
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
 :root {
-  --surface: #f8f9ff;
+  --surface: #f6f7f9;
   --surface-raised: #ffffff;
-  --surface-sunken: #eff4ff;
-  --surface-line: #dce6f7;
-  --fg: #0b1c30;
-  --fg-muted: #4e5a6e;
-  --fg-faint: #78849a;
-  --accent: #00704c;
-  --accent-soft: #e2f5ec;
-  --ok: #047857;
-  --ok-soft: #e7f6ef;
-  --warn: #92400e;
-  --warn-soft: #fdf3e3;
-  --danger: #b3261e;
-  --danger-soft: #fdeceb;
-  --rail: #0c111d;
-  --rail-fg: #cbd5e1;
-  --rail-line: #1e293b;
+  --surface-sunken: #eef0f3;
+  --surface-line: #dde1e7;
+  --fg: #0e1116;
+  --fg-muted: #4a5361;
+  --fg-faint: #7a8494;
+  --accent: #0b7a55;
+  --accent-soft: #e3f3ec;
+  --ok: #0b7a55;
+  --ok-soft: #e3f3ec;
+  --warn: #8a4b08;
+  --warn-soft: #fbf1e2;
+  --danger: #b42318;
+  --danger-soft: #fdecea;
+  --rail: #0b0d12;
+  --rail-fg: #c9cfd8;
+  --rail-line: #1c212b;
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --surface: #0b1220;
-    --surface-raised: #121a2a;
-    --surface-sunken: #0e1626;
-    --surface-line: #243149;
-    --fg: #e8eefc;
-    --fg-muted: #9fb0cc;
-    --fg-faint: #76879f;
-    --accent: #34d399;
-    --accent-soft: #0d2a22;
-    --ok: #34d399;
-    --ok-soft: #0d2a22;
-    --warn: #fbbf24;
-    --warn-soft: #2b2113;
-    --danger: #f87171;
-    --danger-soft: #2d1414;
+    --surface: #0a0c10;
+    --surface-raised: #11151b;
+    --surface-sunken: #0d1015;
+    --surface-line: #222833;
+    --fg: #e9edf3;
+    --fg-muted: #9aa4b2;
+    --fg-faint: #6b7584;
+    --accent: #3ddc97;
+    --accent-soft: #0e2a20;
+    --ok: #3ddc97;
+    --ok-soft: #0e2a20;
+    --warn: #f5b946;
+    --warn-soft: #2a2112;
+    --danger: #ff6b5e;
+    --danger-soft: #2e1412;
+    --rail: #07090c;
+    --rail-line: #1a1f28;
     color-scheme: dark;
   }
 }
 
 :root[data-theme="dark"] {
-  --surface: #0b1220;
-  --surface-raised: #121a2a;
-  --surface-sunken: #0e1626;
-  --surface-line: #243149;
-  --fg: #e8eefc;
-  --fg-muted: #9fb0cc;
-  --fg-faint: #76879f;
-  --accent: #34d399;
-  --accent-soft: #0d2a22;
-  --ok: #34d399;
-  --ok-soft: #0d2a22;
-  --warn: #fbbf24;
-  --warn-soft: #2b2113;
-  --danger: #f87171;
-  --danger-soft: #2d1414;
+  --surface: #0a0c10;
+  --surface-raised: #11151b;
+  --surface-sunken: #0d1015;
+  --surface-line: #222833;
+  --fg: #e9edf3;
+  --fg-muted: #9aa4b2;
+  --fg-faint: #6b7584;
+  --accent: #3ddc97;
+  --accent-soft: #0e2a20;
+  --ok: #3ddc97;
+  --ok-soft: #0e2a20;
+  --warn: #f5b946;
+  --warn-soft: #2a2112;
+  --danger: #ff6b5e;
+  --danger-soft: #2e1412;
+  --rail: #07090c;
+  --rail-line: #1a1f28;
   color-scheme: dark;
 }
 
@@ -78,6 +86,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+h1 { letter-spacing: -0.02em; }
 h1, h2, h3 { text-wrap: balance; }
 [hidden] { display: none !important; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -92,7 +101,7 @@ h1, h2, h3 { text-wrap: balance; }
 .pill {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 2px 8px; border-radius: 999px;
-  font-size: 11px; font-weight: 600; letter-spacing: 0.01em;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.01em; line-height: 1.4;
 }
 .pill-ok { background: var(--ok-soft); color: var(--ok); }
 .pill-warn { background: var(--warn-soft); color: var(--warn); }
@@ -101,24 +110,25 @@ h1, h2, h3 { text-wrap: balance; }
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  padding: 7px 12px; border-radius: 8px; font-size: 13px; font-weight: 600;
+  padding: 7px 14px; border-radius: 8px; font-size: 13px; font-weight: 600;
   border: 1px solid var(--surface-line); background: var(--surface-raised); color: var(--fg);
   cursor: pointer; transition: background 120ms, border-color 120ms;
 }
 .btn:hover:not(:disabled) { background: var(--surface-sunken); }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn-primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
-.btn-danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+.btn-danger { color: var(--danger); border-color: var(--danger); }
 .btn-danger:hover:not(:disabled) { background: var(--danger-soft); }
 
 .field {
-  width: 100%; padding: 8px 10px; border-radius: 8px;
+  width: 100%; padding: 9px 11px; border-radius: 8px;
   border: 1px solid var(--surface-line); background: var(--surface-sunken); color: var(--fg);
-  font-size: 13px; font-family: var(--font-mono);
+  font-size: 12px; font-family: var(--font-mono);
 }
+.field::placeholder { color: var(--fg-faint); }
 .field:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-.label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-muted); }
+.label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-muted); }
 
 .bar { height: 6px; border-radius: 999px; background: var(--surface-sunken); overflow: hidden; }
 .bar > span { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
@@ -126,32 +136,48 @@ h1, h2, h3 { text-wrap: balance; }
 .bar.over > span { background: var(--danger); }
 
 .code {
-  background: var(--rail); color: #e2e8f0; border-radius: 10px; padding: 12px;
+  background: var(--rail); color: var(--rail-fg); border-radius: 10px; padding: 14px;
   font-family: var(--font-mono); font-size: 11.5px; line-height: 1.65;
   overflow-x: auto; white-space: pre;
 }
 
 table.data { width: 100%; border-collapse: collapse; }
 table.data th {
-  text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
-  color: var(--fg-muted); font-weight: 600; padding: 10px 14px; background: var(--surface-sunken);
+  text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--fg-muted); font-weight: 600; padding: 10px 16px; background: var(--surface-sunken);
   white-space: nowrap;
 }
-table.data td { padding: 12px 14px; vertical-align: top; border-top: 1px solid var(--surface-line); }
+table.data td { padding: 14px 16px; vertical-align: top; border-top: 1px solid var(--surface-line); }
 table.data tr:hover td { background: color-mix(in srgb, var(--surface-sunken) 60%, transparent); }
+/* A refusal reads before its code does: the whole row carries the tint. */
+table.data tbody tr:has(.pill-danger) td,
+table.data tbody tr:has(.pill-danger):hover td { background: var(--danger-soft); }
 
 .exact { text-decoration: underline dotted var(--fg-faint); text-underline-offset: 3px; cursor: help; }
 
 /* ── rail ─────────────────────────────────────────────────── */
 .rail { background: var(--rail); color: var(--rail-fg); border-right: 1px solid var(--rail-line); }
 .rail a {
-  display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 8px;
-  color: #94a3b8; font-size: 13px; text-decoration: none; transition: background 120ms, color 120ms;
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px;
+  color: var(--rail-fg); font-size: 13px; font-weight: 500; text-decoration: none;
+  transition: background 120ms, color 120ms;
 }
-.rail a:hover { background: #1e293b99; color: #e2e8f0; }
+.rail a:hover { background: color-mix(in srgb, var(--rail-line) 60%, transparent); color: #f2f4f7; }
+/* The rail is dark in both themes, so its accent is the dark-theme accent. */
 .rail a[aria-current="page"] {
-  background: #1e293b; color: #f1f5f9; font-weight: 600;
-  box-shadow: inset 2px 0 0 var(--accent);
+  background: var(--rail-line); color: #f2f4f7; font-weight: 600;
+  box-shadow: inset 2px 0 0 #3ddc97;
+}
+
+/* Below md the content is no longer offset for the rail (md:pl-[232px]), so
+   the rail collapses to a brand row over a sideways-scrolling tab strip rather
+   than covering the page. */
+@media (max-width: 767px) {
+  .rail { position: static; width: auto; height: auto; border-right: 0; border-bottom: 1px solid var(--rail-line); }
+  .rail > nav { display: flex; flex-direction: row; gap: 4px; overflow-x: auto; padding: 6px 12px 10px; }
+  .rail > nav a { flex: none; padding: 6px 10px; }
+  .rail a[aria-current="page"] { box-shadow: inset 0 -2px 0 #3ddc97; }
+  .rail > div:last-child { display: none; }
 }
 
 @keyframes pulse { 0%,100% { opacity: 0.35 } 50% { opacity: 0.9 } }

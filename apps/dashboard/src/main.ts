@@ -105,13 +105,13 @@ function shell(body: string): string {
   return `
   <aside class="rail fixed left-0 top-0 h-screen w-[232px] z-40 flex flex-col">
     <div class="h-14 px-4 flex items-center justify-between" style="border-bottom:1px solid var(--rail-line)">
-      <span class="font-semibold tracking-wide text-slate-100">KEYRING</span>
-      <span class="pill" style="background:#78350f33;color:#fbbf24">testnet</span>
+      <span class="font-bold text-[13px] tracking-[0.14em] text-[#f2f4f7]">KEYRING</span>
+      <span class="pill" style="background:#2a2112;color:#f5b946">testnet</span>
     </div>
     <nav class="flex-1 p-2 grid gap-1 content-start">${nav}</nav>
-    <div class="p-3 text-[11px]" style="border-top:1px solid var(--rail-line);color:#64748b">
-      <div class="label" style="color:#64748b">Contract</div>
-      <div class="mono truncate" style="color:#cbd5e1" title="${esc(state.account)}">${esc(state.account)}</div>
+    <div class="p-3 text-[11px]" style="border-top:1px solid var(--rail-line);color:#6b7584">
+      <div class="label" style="color:#6b7584">Contract</div>
+      <div class="mono truncate" style="color:var(--rail-fg)" title="${esc(state.account)}">${esc(state.account)}</div>
       <div class="mono truncate mt-1" title="${
         state.signer === "mock" ? "mock signer" : esc(state.signer.mpc.contract_id)
       }">${state.signer === "mock" ? "mock signer" : esc(state.signer.mpc.contract_id)}</div>
@@ -291,6 +291,11 @@ function wire(): void {
 
   const walletBtn = document.getElementById("wallet-btn");
   walletBtn?.addEventListener("click", async () => {
+    // The wallet code is fetched on first use, which takes a second or two;
+    // say so, rather than leaving a button that looks dead.
+    const label = walletBtn.textContent;
+    walletBtn.setAttribute("disabled", "");
+    walletBtn.textContent = "Opening…";
     try {
       const w = await wallet();
       if (walletBtn.getAttribute("data-mode") === "in") {
@@ -306,6 +311,11 @@ function wire(): void {
       }
     } catch (err) {
       result("err", esc((err as Error).message));
+    } finally {
+      // render() may already have replaced the button; this only touches the
+      // old one if it is still on the page.
+      walletBtn.removeAttribute("disabled");
+      walletBtn.textContent = label;
     }
   });
 

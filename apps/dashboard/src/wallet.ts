@@ -18,6 +18,9 @@ import {
 } from "@near-wallet-selector/core";
 import { setupModal, type WalletSelectorModal } from "@near-wallet-selector/modal-ui-js";
 import { setupMyNearWallet } from "@near-wallet-selector/my-near-wallet";
+// The modal ships its layout as a separate stylesheet. Without it the modal is
+// mounted but invisible, so "Connect wallet" appears to do nothing.
+import "@near-wallet-selector/modal-ui-js/styles.css";
 
 import { NETWORK_ID, OWNER_CALL_GAS } from "./config";
 
